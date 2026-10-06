@@ -11,7 +11,6 @@ import {
   CircleHelp,
   Clock3,
   FileBadge2,
-  FileUp,
   Fingerprint,
   GitBranch,
   Gauge,
@@ -21,20 +20,33 @@ import {
   ShieldCheck,
   Sparkles,
   TerminalSquare,
-  Upload,
   Wifi,
   X,
 } from "lucide-react";
-import { applyVerifiedRepair, generateCertificate, getCertificate, getDashboardSummary, getHealth, getHindsightSummary, proposeRepair, scanWebsite, verifyRepair } from "./services/api";
-import type { AccessibilityCertificate, CertificateRequest, DashboardSummary, HindsightSummary, RepairApplicationRequest, RepairApplicationResult, RepairProposal, RepairProposalRequest, ScanResponse, ScanViolation, ServiceState, VerificationRequest, VerificationResult } from "./types/api";
+import { applyVerifiedRepair, generateCertificate, getCertificate, getDashboardSummary, getHealth, getHindsightIssueHistory, getHindsightSummary, proposeRepair, scanWebsite, verifyRepair } from "./services/api";
+import type { AccessibilityCertificate, CertificateRequest, DashboardSummary, HindsightIssueHistory, HindsightOccurrence, HindsightSummary, RepairApplicationRequest, RepairApplicationResult, RepairProposal, RepairProposalRequest, ScanResponse, ScanViolation, ServiceState, VerificationRequest, VerificationResult } from "./types/api";
 import DashboardPanel from "./components/dashboard/DashboardPanel";
 import ProjectAnalysisPanel from "./components/projects/ProjectAnalysisPanel";
 
 const workflow = ["Scan", "Detect", "Propose", "Verify", "Apply", "Re-scan", "Hindsight"];
 const impactFilters = ["All", "Critical", "Serious", "Moderate", "Minor"] as const;
 type ImpactFilter = (typeof impactFilters)[number];
+type WorkspacePage = "overview" | "scan" | "certificates" | "history";
+
+const pageLabels: Record<WorkspacePage, string> = {
+  overview: "Overview",
+  scan: "New Scan",
+  certificates: "Certificates",
+  history: "Scan History",
+};
+
+function pageFromLocation(): WorkspacePage {
+  const hash = window.location.hash.slice(1);
+  return Object.keys(pageLabels).includes(hash) ? (hash as WorkspacePage) : "overview";
+}
 
 function App() {
+  const [activePage, setActivePage] = useState<WorkspacePage>(pageFromLocation);
   const [serviceState, setServiceState] = useState<ServiceState>("checking");
   const [healthError, setHealthError] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
@@ -48,8 +60,12 @@ function App() {
   const [hindsightError, setHindsightError] = useState("");
   const [isHindsightLoading, setIsHindsightLoading] = useState(false);
   const [viewedCertificate, setViewedCertificate] = useState<AccessibilityCertificate | null>(null);
+  const [certificateAttemptedId, setCertificateAttemptedId] = useState<string | null>(null);
   const [certificateViewError, setCertificateViewError] = useState("");
   const [isCertificateLoading, setIsCertificateLoading] = useState(false);
+  const [historyOccurrences, setHistoryOccurrences] = useState<HindsightOccurrence[] | null>(null);
+  const [historyError, setHistoryError] = useState("");
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
 
   async function refreshDashboard() {
     setIsDashboardLoading(true);
@@ -85,6 +101,7 @@ function App() {
   async function handleViewCertificate() {
     const certificateId = dashboardSummary?.certificate.certificate_id;
     if (!certificateId) return;
+    setCertificateAttemptedId(certificateId);
     setIsCertificateLoading(true);
     setCertificateViewError("");
     try {
@@ -97,6 +114,12 @@ function App() {
       setIsCertificateLoading(false);
     }
   }
+
+  useEffect(() => {
+    const syncPage = () => setActivePage(pageFromLocation());
+    window.addEventListener("hashchange", syncPage);
+    return () => window.removeEventListener("hashchange", syncPage);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -119,6 +142,72 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const certificateId = dashboardSummary?.certificate.certificate_id;
+    if (
+      activePage !== "certificates" ||
+      !certificateId ||
+      viewedCertificate?.certificate_id === certificateId ||
+      isCertificateLoading ||
+      certificateAttemptedId === certificateId
+    ) {
+      return;
+    }
+
+    void handleViewCertificate();
+  }, [
+    activePage,
+    dashboardSummary,
+    viewedCertificate,
+    isCertificateLoading,
+    certificateAttemptedId,
+  ]);
+
+  useEffect(() => {
+    if (activePage !== "history" || !hindsightSummary) return;
+
+    const ruleIds = Array.from(
+      new Set(
+        [...hindsightSummary.new_issues, ...hindsightSummary.recurring_issues].map(
+          (issue) => issue.rule_id,
+        ),
+      ),
+    );
+    if (ruleIds.length === 0) {
+      setHistoryOccurrences([]);
+      setHistoryError("");
+      setIsHistoryLoading(false);
+      return;
+    }
+
+    let active = true;
+    setHistoryOccurrences(null);
+    setHistoryError("");
+    setIsHistoryLoading(true);
+    Promise.all(ruleIds.map((ruleId) => getHindsightIssueHistory(ruleId)))
+      .then((histories: HindsightIssueHistory[]) => {
+        if (!active) return;
+        setHistoryOccurrences(
+          histories
+            .flatMap((history) => history.occurrences)
+            .sort((left, right) => right.scanned_at.localeCompare(left.scanned_at)),
+        );
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setHistoryError(
+          error instanceof Error ? error.message : "Could not retrieve scan history.",
+        );
+      })
+      .finally(() => {
+        if (active) setIsHistoryLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [activePage, hindsightSummary]);
+
   async function handleScan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsScanning(true);
@@ -140,7 +229,7 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a aria-label="Access Lab home" className="brand" href="#">
+        <a aria-label="Access Lab home" className="brand" href="#overview">
           <span className="brand-mark">
             <Fingerprint size={21} strokeWidth={1.8} />
           </span>
@@ -158,17 +247,17 @@ function App() {
 
         <div className="side-label">WORKSPACE</div>
         <nav aria-label="Main navigation" className="side-nav">
-          <a aria-current="page" className="nav-link selected" href="#overview">
-            <Gauge size={17} /><span>Overview</span><span className="nav-active-dot" />
+          <a aria-label="Overview" aria-current={activePage === "overview" ? "page" : undefined} className={`nav-link ${activePage === "overview" ? "selected" : ""}`} href="#overview">
+            <Gauge size={17} /><span>Overview</span>{activePage === "overview" && <span className="nav-active-dot" />}
           </a>
-          <a className="nav-link muted-link" href="#scan">
-            <ScanLine size={17} /><span>New scan</span>
+          <a aria-label="New scan" aria-current={activePage === "scan" ? "page" : undefined} className={`nav-link ${activePage === "scan" ? "selected" : ""}`} href="#scan">
+            <ScanLine size={17} /><span>New scan</span>{activePage === "scan" && <span className="nav-active-dot" />}
           </a>
-          <a className="nav-link muted-link" href="#certificates">
-            <FileBadge2 size={17} /><span>Certificates</span>
+          <a aria-label="Certificates" aria-current={activePage === "certificates" ? "page" : undefined} className={`nav-link ${activePage === "certificates" ? "selected" : ""}`} href="#certificates">
+            <FileBadge2 size={17} /><span>Certificates</span>{activePage === "certificates" && <span className="nav-active-dot" />}
           </a>
-          <a className="nav-link muted-link" href="#history">
-            <Clock3 size={17} /><span>Scan history</span>
+          <a aria-label="Scan history" aria-current={activePage === "history" ? "page" : undefined} className={`nav-link ${activePage === "history" ? "selected" : ""}`} href="#history">
+            <Clock3 size={17} /><span>Scan history</span>{activePage === "history" && <span className="nav-active-dot" />}
           </a>
         </nav>
 
@@ -191,9 +280,9 @@ function App() {
         </div>
       </aside>
 
-      <main className="main-panel" id="overview">
+      <main className="main-panel" id="main-content">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>Overview</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{pageLabels[activePage]}</strong></div>
           <div className="topbar-right">
             <div aria-live="polite" className={`connection-pill ${serviceState}`}>
               <span className="connection-dot" />
@@ -217,99 +306,162 @@ function App() {
             </div>
           )}
 
-          <section className="welcome-row">
-            <div>
-              <div className="eyebrow"><span className="eyebrow-line" /> ACCESSIBILITY WORKSPACE <span className="eyebrow-separator">/</span> OVERVIEW</div>
-              <h1>Accessibility repair,<br /><span>with evidence.</span></h1>
-              <p className="welcome-description">Detect issues. Verify every change. Certify what holds up.</p>
-            </div>
-            <div className="welcome-meta">
-              <div className="meta-orbit"><div className="orbit-ring"><div className="orbit-core"><Fingerprint size={23} /></div></div><span className="orbit-dot" /></div>
-              <div><strong>VERIFICATION FIRST</strong><span>AI suggests. Rules decide.</span></div>
-            </div>
-          </section>
-
-          <section aria-label="Accessibility workflow" className="workflow-strip">
-            <div className="workflow-heading"><GitBranch size={15} /><span>ACCESSIBILITY PIPELINE</span><span className="pipeline-live"><i /> EVIDENCE CERTIFICATES</span></div>
-            <div className="workflow-steps">
-                {workflow.map((step, index) => (
-                <div className={`workflow-step ${index === 0 ? "current" : ""}`} key={step}>
-                  <span className="step-number">{String(index + 1).padStart(2, "0")}</span>
-                  <span className="step-label">{step}</span>
-                  {index === 0 && <ArrowDown className="step-arrow" size={14} />}
-                </div>
-              ))}
-              <span className="workflow-status">EVIDENCE-BASED RECURRENCE ANALYSIS</span>
-            </div>
-          </section>
-
-          <section className="scan-card" id="scan">
-            <div className="scan-card-main">
-              <div className="scan-topline"><span className="scan-icon"><Globe2 size={17} /></span><span>START A NEW ASSESSMENT</span><span className="scan-protocol"><LockKeyhole size={11} /> SAFE BY DESIGN</span></div>
-              <h2>Bring a site into focus.</h2>
-              <p>Run axe-core against the rendered site. Only detected violations are reported—no scores or repairs are inferred.</p>
-              <form onSubmit={handleScan}>
-                <label className="url-input-wrap" htmlFor="website-url">
-                  <Globe2 size={17} />
-                  <input
-                    autoComplete="url"
-                    id="website-url"
-                    onChange={(event) => setWebsiteUrl(event.target.value)}
-                    placeholder="https://your-website.com"
-                    required
-                    type="url"
-                    value={websiteUrl}
-                  />
-                  <span className="input-lock"><LockKeyhole size={12} /> PRIVATE</span>
-                </label>
-                <div className="scan-actions">
-                  <button aria-busy={isScanning} className="primary-button" disabled={isScanning || !websiteUrl.trim()} type="submit">
-                    <ScanLine size={15} /> {isScanning ? "Scanning website…" : "Scan website"}
-                  </button>
-                  <span aria-live="polite" className="scan-duration">{isScanning ? "Opening site and running axe-core" : "Public HTTP(S) websites only"}</span>
-                </div>
-              </form>
-              <div className="scan-actions upload-row">
-                <span className="or-divider">OR</span>
-                <button className="upload-button" disabled title="Project uploads are coming soon"><Upload size={15} /> Upload project <FileUp size={13} /></button>
-                <span className="upload-hint">ZIP project support planned</span>
+          <section
+            aria-label="Overview"
+            className="app-page"
+            hidden={activePage !== "overview"}
+          >
+            <section className="welcome-row">
+              <div>
+                <div className="eyebrow"><span className="eyebrow-line" /> ACCESSIBILITY WORKSPACE <span className="eyebrow-separator">/</span> OVERVIEW</div>
+                <h1>Accessibility repair,<br /><span>with evidence.</span></h1>
+                <p className="welcome-description">Detect issues. Verify every change. Certify what holds up.</p>
               </div>
-            </div>
-            <div className="scan-card-aside">
-              <div className="aside-orbit orbit-large"><div className="orbit-ring"><div className="orbit-core"><ScanLine size={26} /></div></div><span className="orbit-dot" /><span className="orbit-dot orbit-dot-two" /></div>
-              <span className="aside-label">NO TARGET SELECTED</span>
-              <span className="aside-caption">Your first scan will appear here.</span>
-              <span className="aside-index">ASSESSMENT / 0000</span>
-            </div>
+              <div className="welcome-meta">
+                <div className="meta-orbit"><div className="orbit-ring"><div className="orbit-core"><Fingerprint size={23} /></div></div><span className="orbit-dot" /></div>
+                <div><strong>VERIFICATION FIRST</strong><span>AI suggests. Rules decide.</span></div>
+              </div>
+            </section>
+
+            <section aria-label="Accessibility workflow" className="workflow-strip">
+              <div className="workflow-heading"><GitBranch size={15} /><span>ACCESSIBILITY PIPELINE</span><span className="pipeline-live"><i /> EVIDENCE CERTIFICATES</span></div>
+              <div className="workflow-steps">
+                {workflow.map((step, index) => (
+                  <div className={`workflow-step ${index === 0 ? "current" : ""}`} key={step}>
+                    <span className="step-number">{String(index + 1).padStart(2, "0")}</span>
+                    <span className="step-label">{step}</span>
+                    {index === 0 && <ArrowDown className="step-arrow" size={14} />}
+                  </div>
+                ))}
+                <span className="workflow-status">EVIDENCE-BASED RECURRENCE ANALYSIS</span>
+              </div>
+            </section>
+
+            <DashboardPanel
+              summary={dashboardSummary}
+              error={dashboardError}
+              isLoading={isDashboardLoading}
+              certificate={viewedCertificate}
+              certificateError={certificateViewError}
+              isCertificateLoading={isCertificateLoading}
+              hindsightSummary={hindsightSummary}
+              hindsightError={hindsightError}
+              isHindsightLoading={isHindsightLoading}
+              onRefresh={() => void refreshDashboard()}
+              onViewCertificate={() => void handleViewCertificate()}
+            />
           </section>
 
-          <ProjectAnalysisPanel
-            hindsight={hindsightSummary}
-            onWorkflowUpdate={() => void refreshDashboard()}
-          />
+          <section
+            aria-label="New Scan"
+            className="app-page"
+            hidden={activePage !== "scan"}
+          >
+            <PageHeading
+              eyebrow="ACCESSIBILITY WORKSPACE / NEW SCAN"
+              title="Scan a real website"
+              description="Submit a public HTTP(S) URL to run the backend Playwright and axe-core scan."
+            />
+            <section className="scan-card" id="scan">
+              <div className="scan-card-main">
+                <div className="scan-topline"><span className="scan-icon"><Globe2 size={17} /></span><span>START A NEW ASSESSMENT</span><span className="scan-protocol"><LockKeyhole size={11} /> SAFE BY DESIGN</span></div>
+                <h2>Bring a site into focus.</h2>
+                <p>Run axe-core against the rendered site. Only detected violations are reported—no scores or repairs are inferred.</p>
+                <form onSubmit={handleScan}>
+                  <label className="url-input-wrap" htmlFor="website-url">
+                    <Globe2 size={17} />
+                    <input
+                      autoComplete="url"
+                      id="website-url"
+                      onChange={(event) => setWebsiteUrl(event.target.value)}
+                      placeholder="https://your-website.com"
+                      required
+                      type="url"
+                      value={websiteUrl}
+                    />
+                    <span className="input-lock"><LockKeyhole size={12} /> PRIVATE</span>
+                  </label>
+                  <div className="scan-actions">
+                    <button aria-busy={isScanning} className="primary-button" disabled={isScanning || !websiteUrl.trim()} type="submit">
+                      <ScanLine size={15} /> {isScanning ? "Scanning website…" : "Scan Website"}
+                    </button>
+                    <span aria-live="polite" className="scan-duration">{isScanning ? "Opening site and running axe-core" : "Public HTTP(S) websites only"}</span>
+                  </div>
+                </form>
+                <div className="scan-actions upload-row">
+                  <span className="or-divider">OR</span>
+                  <span className="upload-hint">Analyze an existing project ZIP below.</span>
+                </div>
+              </div>
+              <div className="scan-card-aside">
+                <div className="aside-orbit orbit-large"><div className="orbit-ring"><div className="orbit-core"><ScanLine size={26} /></div></div><span className="orbit-dot" /><span className="orbit-dot orbit-dot-two" /></div>
+                <span className="aside-label">LIVE AXE-CORE SCAN</span>
+                <span className="aside-caption">Results are returned by the backend.</span>
+                <span className="aside-index">SCAN / DETECT</span>
+              </div>
+            </section>
 
-          {scanError && (
-            <div className="scan-error" role="alert">
-              <Wifi size={16} />
-              <span><strong>Scan could not be completed.</strong>{scanError}</span>
-            </div>
-          )}
+            {scanError && (
+              <div className="scan-error" role="alert">
+                <Wifi size={16} />
+                <span><strong>Scan could not be completed.</strong>{scanError}</span>
+              </div>
+            )}
 
-          <DashboardPanel
-            summary={dashboardSummary}
-            error={dashboardError}
-            isLoading={isDashboardLoading}
-            certificate={viewedCertificate}
-            certificateError={certificateViewError}
-            isCertificateLoading={isCertificateLoading}
-            hindsightSummary={hindsightSummary}
-            hindsightError={hindsightError}
-            isHindsightLoading={isHindsightLoading}
-            onRefresh={() => void refreshDashboard()}
-            onViewCertificate={() => void handleViewCertificate()}
-          />
+            {scanResult && <ScanResults result={scanResult} onWorkflowUpdate={() => void refreshDashboard()} />}
 
-          {scanResult && <ScanResults result={scanResult} onWorkflowUpdate={() => void refreshDashboard()} />}
+            <ProjectAnalysisPanel
+              hindsight={hindsightSummary}
+              onWorkflowUpdate={() => void refreshDashboard()}
+            />
+          </section>
+
+          <section
+            aria-label="Certificates"
+            className="app-page"
+            hidden={activePage !== "certificates"}
+          >
+            <PageHeading
+              eyebrow="ACCESSIBILITY WORKSPACE / CERTIFICATES"
+              title="Verification certificates"
+              description="Certificates issued from backend-recorded verified repair evidence."
+            />
+            <CertificatePage
+              summary={dashboardSummary}
+              dashboardError={dashboardError}
+              isDashboardLoading={isDashboardLoading}
+              certificate={
+                viewedCertificate?.certificate_id === dashboardSummary?.certificate.certificate_id
+                  ? viewedCertificate
+                  : null
+              }
+              certificateError={certificateViewError}
+              isCertificateLoading={isCertificateLoading}
+              onRefresh={() => void refreshDashboard()}
+              onRetry={() => void handleViewCertificate()}
+            />
+          </section>
+
+          <section
+            aria-label="Scan History"
+            className="app-page"
+            hidden={activePage !== "history"}
+          >
+            <PageHeading
+              eyebrow="ACCESSIBILITY WORKSPACE / SCAN HISTORY"
+              title="Recorded scan history"
+              description="Historical findings loaded from persisted backend scan and Hindsight records."
+            />
+            <ScanHistoryPage
+              summary={hindsightSummary}
+              summaryError={hindsightError}
+              isSummaryLoading={isHindsightLoading}
+              occurrences={historyOccurrences}
+              error={historyError}
+              isLoading={isHistoryLoading}
+              onRefresh={() => void refreshDashboard()}
+            />
+          </section>
 
           <footer className="page-footer">
             <span><span className="footer-mark"><Fingerprint size={13} /></span> ACCESSLAB <b>·</b> ACCESSIBILITY REPAIR ENGINE</span>
@@ -318,6 +470,227 @@ function App() {
         </div>
       </main>
     </div>
+  );
+}
+
+function PageHeading({
+  eyebrow,
+  title,
+  description,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <header className="workspace-page-heading">
+      <span className="panel-kicker">{eyebrow}</span>
+      <h1>{title}</h1>
+      <p>{description}</p>
+    </header>
+  );
+}
+
+function CertificatePage({
+  summary,
+  dashboardError,
+  isDashboardLoading,
+  certificate,
+  certificateError,
+  isCertificateLoading,
+  onRefresh,
+  onRetry,
+}: {
+  summary: DashboardSummary | null;
+  dashboardError: string;
+  isDashboardLoading: boolean;
+  certificate: AccessibilityCertificate | null;
+  certificateError: string;
+  isCertificateLoading: boolean;
+  onRefresh: () => void;
+  onRetry: () => void;
+}) {
+  const certificateId = summary?.certificate.certificate_id;
+
+  return (
+    <section className="workspace-data-panel" aria-label="Available certificate">
+      <div className="workspace-data-header">
+        <div>
+          <span className="panel-kicker"><FileBadge2 size={14} /> PERSISTED VERIFICATION EVIDENCE</span>
+          <h2>Available certificate</h2>
+        </div>
+        <button className="dashboard-refresh-button" disabled={isDashboardLoading || isCertificateLoading} onClick={onRefresh} type="button">
+          {isDashboardLoading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+      {dashboardError && <p className="workspace-error" role="alert">{dashboardError}</p>}
+      {!summary && isDashboardLoading ? (
+        <p className="workspace-loading" role="status">Loading certificate records…</p>
+      ) : !summary ? (
+        <div className="workspace-empty-state">
+          <ShieldCheck size={23} />
+          <h3>Certificate data is unavailable.</h3>
+          <p>Could not confirm whether a certificate has been recorded.</p>
+        </div>
+      ) : !certificateId ? (
+        <div className="workspace-empty-state">
+          <ShieldCheck size={23} />
+          <h3>No certificates yet</h3>
+          <p>A certificate appears here after a verified repair has been certified.</p>
+        </div>
+      ) : isCertificateLoading ? (
+        <p className="workspace-loading" role="status">Retrieving the recorded certificate…</p>
+      ) : certificateError ? (
+        <div className="workspace-error-state">
+          <p className="workspace-error" role="alert">{certificateError}</p>
+          <button className="dashboard-secondary-button" onClick={onRetry} type="button">Retry certificate retrieval</button>
+        </div>
+      ) : certificate ? (
+        <article className="certificate-record">
+          <header>
+            <div>
+              <span className={`certificate-verification ${certificate.verification_status === "VERIFIED" ? "verified" : "unverified"}`}>
+                {certificate.verification_status}
+              </span>
+              <h3>{certificate.certificate_id}</h3>
+            </div>
+            <time dateTime={certificate.issued_at}>{new Date(certificate.issued_at).toLocaleString()}</time>
+          </header>
+          <dl>
+            <div><dt>Website</dt><dd><a href={certificate.website} rel="noreferrer" target="_blank">{certificate.website}</a></dd></div>
+            <div><dt>Rule</dt><dd>{certificate.rule_id}</dd></div>
+            <div><dt>WCAG criterion</dt><dd>{certificate.wcag_criterion} · Level {certificate.wcag_level}</dd></div>
+            <div><dt>Verification checks passed</dt><dd>{certificate.checks.filter((check) => check.passed).length} / {certificate.checks.length}</dd></div>
+            <div><dt>Scope</dt><dd>{certificate.scope}</dd></div>
+            <div><dt>Evidence SHA-256</dt><dd><code>{certificate.evidence_hash}</code></dd></div>
+          </dl>
+          <p>{certificate.certificate_statement}</p>
+          <details>
+            <summary>View verification checks and limitations</summary>
+            <ul>{certificate.checks.map((check) => (
+              <li className={check.passed ? "passed" : "failed"} key={check.name}>
+                <strong>{check.passed ? "Passed" : "Failed"} · {check.name.replace(/_/g, " ")}</strong>
+                <span>{check.message}</span>
+              </li>
+            ))}</ul>
+            <ul>{certificate.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul>
+          </details>
+        </article>
+      ) : (
+        <p className="workspace-loading" role="status">Loading certificate details…</p>
+      )}
+    </section>
+  );
+}
+
+function ScanHistoryPage({
+  summary,
+  summaryError,
+  isSummaryLoading,
+  occurrences,
+  error,
+  isLoading,
+  onRefresh,
+}: {
+  summary: HindsightSummary | null;
+  summaryError: string;
+  isSummaryLoading: boolean;
+  occurrences: HindsightOccurrence[] | null;
+  error: string;
+  isLoading: boolean;
+  onRefresh: () => void;
+}) {
+  const scans = new Map<
+    string,
+    { scannedAt: string; website: string; findings: HindsightOccurrence[] }
+  >();
+  for (const occurrence of occurrences ?? []) {
+    const existing = scans.get(occurrence.scan_id);
+    if (existing) {
+      existing.findings.push(occurrence);
+    } else {
+      scans.set(occurrence.scan_id, {
+        scannedAt: occurrence.scanned_at,
+        website: occurrence.website,
+        findings: [occurrence],
+      });
+    }
+  }
+  const scanRecords = Array.from(scans.entries()).sort(
+    (left, right) => right[1].scannedAt.localeCompare(left[1].scannedAt),
+  );
+
+  return (
+    <section className="workspace-data-panel" aria-label="Recorded scans">
+      <div className="workspace-data-header">
+        <div>
+          <span className="panel-kicker"><Clock3 size={14} /> PERSISTED SCAN FINDINGS</span>
+          <h2>Historical scans</h2>
+        </div>
+        <button className="dashboard-refresh-button" disabled={isSummaryLoading || isLoading} onClick={onRefresh} type="button">
+          {isSummaryLoading || isLoading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+      {summaryError && <p className="workspace-error" role="alert">{summaryError}</p>}
+      {summary && (
+        <div className="history-summary" aria-label="Scan history summary">
+          <span><strong>{summary.total_scans_analyzed}</strong> scans analyzed</span>
+          <span><strong>{summary.total_issues_analyzed}</strong> recorded issue occurrences</span>
+        </div>
+      )}
+      {!summary && isSummaryLoading ? (
+        <p className="workspace-loading" role="status">Loading persisted scan history…</p>
+      ) : !summary ? (
+        <div className="workspace-empty-state">
+          <Clock3 size={23} />
+          <h3>Scan history is unavailable.</h3>
+          <p>The backend did not return persisted history.</p>
+        </div>
+      ) : isLoading || (summary.status === "available" && occurrences === null) ? (
+        <p className="workspace-loading" role="status">Loading recorded findings…</p>
+      ) : error ? (
+        <p className="workspace-error" role="alert">{error}</p>
+      ) : scanRecords.length === 0 && summary.total_scans_analyzed === 0 ? (
+        <div className="workspace-empty-state">
+          <Clock3 size={23} />
+          <h3>No scan history yet</h3>
+          <p>Completed scans will appear here when the backend has persisted them.</p>
+        </div>
+      ) : scanRecords.length === 0 ? (
+        <div className="workspace-empty-state">
+          <BadgeCheck size={23} />
+          <h3>No violation records in the available history</h3>
+          <p>The backend reports {summary.total_scans_analyzed} analyzed scan(s), but returned no issue occurrences to display.</p>
+        </div>
+      ) : (
+        <ol className="scan-history-list">
+          {scanRecords.map(([scanId, scan]) => (
+            <li className="scan-history-record" key={scanId}>
+              <header>
+                <div>
+                  <time dateTime={scan.scannedAt}>{new Date(scan.scannedAt).toLocaleString()}</time>
+                  <a href={scan.website} rel="noreferrer" target="_blank">{scan.website}</a>
+                </div>
+                <div className="scan-history-record-meta">
+                  <code>{scanId}</code>
+                  <span>{scan.findings.length} recorded issue{scan.findings.length === 1 ? "" : "s"}</span>
+                </div>
+              </header>
+              <ul>
+                {scan.findings.map((finding) => (
+                  <li key={`${scanId}-${finding.rule_id}`}>
+                    <strong>{finding.rule_id}</strong>
+                    {finding.impact && <span className={`impact-badge ${finding.impact.toLowerCase()}`}>{finding.impact}</span>}
+                    <span>{finding.wcag_criterion ?? "WCAG mapping unavailable"}</span>
+                    {finding.selectors.length > 0 && <code>{finding.selectors.join(", ")}</code>}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
   );
 }
 

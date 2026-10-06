@@ -55,7 +55,13 @@ export default function DashboardPanel({
         </button>
       </header>
       {error && <p className="dashboard-error" role="status">{error}</p>}
-      {!summary && error ? (
+      {!summary && isLoading ? (
+        <div className="dashboard-empty-state" role="status">
+          <Activity size={22} />
+          <h3>Loading dashboard evidence…</h3>
+          <p>Retrieving persisted scan and repair records from the backend.</p>
+        </div>
+      ) : !summary && error ? (
         <div className="dashboard-empty-state">
           <ShieldCheck size={22} />
           <h3>Dashboard evidence is currently unavailable.</h3>

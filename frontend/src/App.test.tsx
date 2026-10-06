@@ -1,13 +1,20 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 
+async function openNewScan(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByText("Backend connected");
+  await user.click(screen.getByRole("link", { name: "New scan" }));
+  expect(await screen.findByRole("heading", { name: "Scan a real website" })).toBeInTheDocument();
+}
+
 describe("dashboard", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    window.history.replaceState(null, "", "/");
   });
 
   beforeEach(() => {
@@ -224,17 +231,182 @@ describe("dashboard", () => {
     expect(workflow.querySelectorAll(".step-label")[5]).toHaveTextContent("Re-scan");
     expect(workflow.querySelectorAll(".step-label")[6]).toHaveTextContent("Hindsight");
     expect(screen.getByText("EVIDENCE-BASED RECURRENCE ANALYSIS")).toBeInTheDocument();
-    expect(screen.getByText("No accessibility scan has been completed yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No accessibility scan has been completed yet.")).toBeInTheDocument();
+  });
+
+  it("switches all four navigation items to their matching content", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Backend connected");
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: /accessibility repair/i })).toBeVisible();
+
+    await user.click(screen.getByRole("link", { name: "New scan" }));
+    expect(screen.getByRole("link", { name: "New scan" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "Scan a real website" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: /private/i })).toBeVisible();
+
+    await user.click(screen.getByRole("link", { name: "Certificates" }));
+    expect(screen.getByRole("link", { name: "Certificates" })).toHaveAttribute("aria-current", "page");
+    expect(await screen.findByRole("heading", { name: "No certificates yet" })).toBeVisible();
+
+    await user.click(screen.getByRole("link", { name: "Scan history" }));
+    expect(screen.getByRole("link", { name: "Scan history" })).toHaveAttribute("aria-current", "page");
+    expect(await screen.findByRole("heading", { name: "No scan history yet" })).toBeVisible();
+
+    await user.click(screen.getByRole("link", { name: "Overview" }));
+    expect(screen.getByRole("heading", { name: /accessibility repair/i })).toBeVisible();
+  });
+
+  it("restores the selected screen from the URL hash on page load", async () => {
+    window.history.replaceState(null, "", "/#history");
+    render(<App />);
+
+    expect(screen.getByRole("link", { name: "Scan history" })).toHaveAttribute("aria-current", "page");
+    expect(await screen.findByRole("heading", { name: "No scan history yet" })).toBeVisible();
+  });
+
+  it("retrieves and displays the available backend certificate", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const fallback = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/api/dashboard/summary")) {
+        return {
+          ok: true,
+          json: async () => ({
+            website: null,
+            state: "no_scan",
+            before: null,
+            after: null,
+            comparison: { status: null, resolved: [], remaining: [], new: [] },
+            repair: {
+              proposed: 0, verified: 0, applied: 0, regressions_detected: 0,
+              success_verified: 0, success_proposed: 0,
+            },
+            certificate: {
+              generated: true, certificate_id: "stored-certificate-1",
+              rule_id: "image-alt", verification_status: "VERIFIED",
+              issued_at: "2026-10-06T16:00:00Z", evidence_hash: "actual-hash",
+              scope: "Supplied fragment only.",
+            },
+            workflow: [],
+            verification_checks: [],
+          }),
+        } as Response;
+      }
+      if (String(input).endsWith("/api/certificates/stored-certificate-1")) {
+        return {
+          ok: true,
+          json: async () => ({
+            certificate_id: "stored-certificate-1",
+            issued_at: "2026-10-06T16:00:00Z",
+            website: "https://example.com/",
+            rule_id: "image-alt",
+            wcag_criterion: "1.1.1 Non-text Content",
+            wcag_level: "A",
+            verification_status: "VERIFIED",
+            checks: [{ name: "axe", passed: true, message: "The finding resolved." }],
+            limitations: ["Automated checks only."],
+            scope: "Supplied fragment only.",
+            evidence_hash: "actual-hash",
+            certificate_statement: "Backend-recorded verification checks passed.",
+          }),
+        } as Response;
+      }
+      return fallback(input, init);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Backend connected");
+    await user.click(screen.getByRole("link", { name: "Certificates" }));
+
+    expect(await screen.findByRole("heading", { name: "stored-certificate-1" })).toBeInTheDocument();
+    expect(screen.getByText("1.1.1 Non-text Content · Level A")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/certificates/stored-certificate-1"))).toBe(true);
+  });
+
+  it("loads scan history from persisted Hindsight occurrence data", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const fallback = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/api/hindsight/summary")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            status: "available",
+            explanation: "Analysis uses persisted scan evidence.",
+            total_scans_analyzed: 1,
+            total_issues_analyzed: 1,
+            recurring_issues: [],
+            new_issues: [{
+              website: "https://example.com/",
+              rule_id: "image-alt",
+              wcag_criterion: "1.1.1 Non-text Content",
+              occurrences: 1,
+              previously_repaired: false,
+              reappeared_after_repair: false,
+              status: "NEW",
+              likely_cause: "Missing alternative text.",
+              prevention_recommendation: null,
+            }],
+            successful_repairs: 0,
+            failed_repairs: 0,
+            returned_after_repair: 0,
+          }),
+        } as Response);
+      }
+      if (String(input).endsWith("/api/hindsight/issues/image-alt")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            status: "available",
+            rule_id: "image-alt",
+            occurrences: [{
+              scan_id: "persisted-scan-1",
+              scanned_at: "2026-10-06T16:00:00Z",
+              website: "https://example.com/",
+              domain: "example.com",
+              rule_id: "image-alt",
+              impact: "critical",
+              wcag_criterion: "1.1.1 Non-text Content",
+              selectors: ["img.hero"],
+              verification_status: null,
+              application_status: null,
+              regression_detected: false,
+              before_violation_count: null,
+              after_violation_count: null,
+              timeline: [],
+            }],
+          }),
+        } as Response);
+      }
+      return fallback(input, init);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Backend connected");
+    await user.click(screen.getByRole("link", { name: "Scan history" }));
+
+    const historyPanel = screen.getByRole("region", { name: "Recorded scans" });
+    expect(await within(historyPanel).findByText("persisted-scan-1")).toBeInTheDocument();
+    expect(within(historyPanel).getByText("image-alt", { exact: true })).toBeInTheDocument();
+    expect(within(historyPanel).getByText("img.hero")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/api/hindsight/issues/image-alt"))).toBe(true);
   });
 
   it("submits the URL and displays real-shaped violation details", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
 
     expect(await screen.findByRole("heading", { name: "1 violation found" })).toBeInTheDocument();
+    const scanCall = vi.mocked(fetch).mock.calls.find(([input]) => String(input).endsWith("/api/scan"));
+    expect(scanCall).toBeDefined();
+    expect(JSON.parse(String(scanCall?.[1]?.body))).toEqual({ url: "https://example.com" });
     expect(screen.getByText("Images must have alternative text")).toBeInTheDocument();
     expect(screen.getByText("critical")).toBeInTheDocument();
     expect(screen.getByText("img.hero")).toBeInTheDocument();
@@ -252,7 +424,7 @@ describe("dashboard", () => {
   it("shows a repair proposal and labels it not verified", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
     await screen.findByRole("heading", { name: "1 violation found" });
@@ -276,7 +448,7 @@ describe("dashboard", () => {
   it("shows independent verification results after a proposal", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
     await screen.findByRole("heading", { name: "1 violation found" });
@@ -295,7 +467,7 @@ describe("dashboard", () => {
   it("applies only the verified repair to an isolated copy and displays before/after findings", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
     await screen.findByRole("heading", { name: "1 violation found" });
@@ -336,7 +508,7 @@ describe("dashboard", () => {
     });
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
     await screen.findByRole("heading", { name: "1 violation found" });
@@ -396,7 +568,7 @@ describe("dashboard", () => {
     });
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
     await screen.findByRole("heading", { name: "1 violation found" });
@@ -415,7 +587,7 @@ describe("dashboard", () => {
   it("generates and displays a verified certificate with JSON actions", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
     await screen.findByRole("heading", { name: "1 violation found" });
@@ -536,7 +708,7 @@ describe("dashboard", () => {
       }),
     );
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
     await screen.findByRole("heading", { name: "1 violation found" });
@@ -612,7 +784,7 @@ describe("dashboard", () => {
       }),
     );
     render(<App />);
-    await screen.findByText("Backend connected");
+    await openNewScan(user);
     await user.type(screen.getByRole("textbox", { name: /private/i }), "https://example.com");
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
 
