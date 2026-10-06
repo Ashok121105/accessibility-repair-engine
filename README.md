@@ -93,7 +93,7 @@ npm install
 npm run dev
 ```
 
-Open the URL printed by Vite (normally `http://localhost:5173`). The dashboard requests `/api/health` through the Vite proxy. To use a different backend URL, set `VITE_API_BASE_URL` in a local frontend `.env` file; this variable is public and must never contain secrets.
+Open the URL printed by Vite (normally `http://localhost:5173`). The dashboard requests `/api/health` through the Vite proxy. Production builds use `https://accessibility-repair-engine-1.onrender.com` by default. To override the backend URL, set the public `VITE_API_BASE_URL` build environment variable; for local development, set it in a frontend `.env` file only when bypassing the Vite proxy. This variable must never contain secrets.
 
 ### Checks
 

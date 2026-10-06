@@ -16,7 +16,11 @@ import type {
   VerificationResult,
 } from "../types/api";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  (import.meta.env.PROD
+    ? "https://accessibility-repair-engine-1.onrender.com"
+    : "");
 
 export async function getHealth(): Promise<HealthResponse> {
   const response = await fetch(`${API_BASE_URL}/api/health`);
