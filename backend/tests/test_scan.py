@@ -78,6 +78,41 @@ def test_scan_endpoint_rejects_invalid_url_without_scanning(monkeypatch) -> None
     assert "valid public HTTP or HTTPS URL" in response.json()["detail"][0]["msg"]
 
 
+def test_scan_endpoint_resolves_website_names_through_existing_discovery(monkeypatch) -> None:
+    scanned_urls: list[str] = []
+
+    async def fake_scan(url: str) -> ScanResponse:
+        scanned_urls.append(url)
+        return ScanResponse(
+            url=url,
+            final_url=url,
+            page_title="Amazon",
+            total_violations=0,
+            violations=[],
+        )
+
+    monkeypatch.setattr(scan_api, "scan_website", fake_scan)
+    monkeypatch.setattr(scan_api, "save_scan", lambda _scan: None)
+
+    response = client.post("/api/scan", json={"url": "Amazon"})
+
+    assert response.status_code == 200
+    assert scanned_urls == ["https://www.amazon.in/"]
+    assert response.json()["url"] == "https://www.amazon.in/"
+
+
+def test_scan_endpoint_rejects_unknown_website_names_without_scanning(monkeypatch) -> None:
+    def unexpected_scan(_url: str) -> None:
+        raise AssertionError("The scanner must not receive an invented URL")
+
+    monkeypatch.setattr(scan_api, "scan_website", unexpected_scan)
+
+    response = client.post("/api/scan", json={"url": "mystery shop"})
+
+    assert response.status_code == 422
+    assert "provide the exact URL" in response.json()["detail"]
+
+
 def test_scan_endpoint_rejects_private_network_targets() -> None:
     response = client.post("/api/scan", json={"url": "http://127.0.0.1"})
 

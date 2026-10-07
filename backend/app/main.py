@@ -1,6 +1,10 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.app.agent.service import agent_sessions
+from backend.app.api.agent import router as agent_router
 from backend.app.api.health import router as health_router
 from backend.app.api.projects import router as projects_router
 from backend.app.api.hindsight import router as hindsight_router
@@ -15,10 +19,21 @@ from backend.app.projects.upload_limits import UploadSizeLimitMiddleware
 
 settings = get_settings()
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    agent_sessions.start_cleanup_worker()
+    try:
+        yield
+    finally:
+        await agent_sessions.shutdown()
+
+
 app = FastAPI(
     title="Accessibility Repair Engine",
     description="API foundation for verified accessibility repair workflows.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -37,3 +52,4 @@ app.include_router(certificates_router, prefix="/api")
 app.include_router(dashboard_router, prefix="/api")
 app.include_router(hindsight_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
+app.include_router(agent_router, prefix="/api")

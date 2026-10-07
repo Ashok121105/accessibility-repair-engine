@@ -16,6 +16,7 @@ import {
   Gauge,
   Globe2,
   LockKeyhole,
+  MessageSquareText,
   ScanLine,
   ShieldCheck,
   Sparkles,
@@ -26,18 +27,29 @@ import {
 import { applyVerifiedRepair, generateCertificate, getCertificate, getDashboardSummary, getHealth, getHindsightIssueHistory, getHindsightSummary, proposeRepair, scanWebsite, verifyRepair } from "./services/api";
 import type { AccessibilityCertificate, CertificateRequest, DashboardSummary, HindsightIssueHistory, HindsightOccurrence, HindsightSummary, RepairApplicationRequest, RepairApplicationResult, RepairProposal, RepairProposalRequest, ScanResponse, ScanViolation, ServiceState, VerificationRequest, VerificationResult } from "./types/api";
 import DashboardPanel from "./components/dashboard/DashboardPanel";
+import WebsiteHindsight from "./components/hindsight/WebsiteHindsight";
 import ProjectAnalysisPanel from "./components/projects/ProjectAnalysisPanel";
+import AccessibilityAssistant from "./components/assistant/AccessibilityAssistant";
 
 const workflow = ["Scan", "Detect", "Propose", "Verify", "Apply", "Re-scan", "Hindsight"];
 const impactFilters = ["All", "Critical", "Serious", "Moderate", "Minor"] as const;
 type ImpactFilter = (typeof impactFilters)[number];
-type WorkspacePage = "overview" | "scan" | "certificates" | "history";
+type WorkspacePage = "overview" | "scan" | "certificates" | "history" | "assistant";
+type RepairWorkflowStage = "repair" | "verify" | "certify";
+type WorkflowStageStatus = "not-started" | "active" | "completed";
+
+interface RepairWorkflowState {
+  repair: WorkflowStageStatus;
+  verify: WorkflowStageStatus;
+  certify: WorkflowStageStatus;
+}
 
 const pageLabels: Record<WorkspacePage, string> = {
   overview: "Overview",
   scan: "New Scan",
   certificates: "Certificates",
   history: "Scan History",
+  assistant: "Accessibility Assistant",
 };
 
 function pageFromLocation(): WorkspacePage {
@@ -53,6 +65,11 @@ function App() {
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState("");
   const [scanResult, setScanResult] = useState<ScanResponse | null>(null);
+  const [repairWorkflow, setRepairWorkflow] = useState<RepairWorkflowState>({
+    repair: "not-started",
+    verify: "not-started",
+    certify: "not-started",
+  });
   const [dashboardSummary, setDashboardSummary] = useState<DashboardSummary | null>(null);
   const [dashboardError, setDashboardError] = useState("");
   const [isDashboardLoading, setIsDashboardLoading] = useState(false);
@@ -213,10 +230,11 @@ function App() {
     setIsScanning(true);
     setScanError("");
     setScanResult(null);
+    setRepairWorkflow({ repair: "not-started", verify: "not-started", certify: "not-started" });
 
     try {
-      setScanResult(await scanWebsite(websiteUrl));
-      await refreshDashboard();
+      setScanResult(await scanWebsite(websiteUrl.trim()));
+      void refreshDashboard();
     } catch (error: unknown) {
       setScanError(
         error instanceof Error ? error.message : "The website scan failed.",
@@ -224,6 +242,10 @@ function App() {
     } finally {
       setIsScanning(false);
     }
+  }
+
+  function updateRepairWorkflow(stage: RepairWorkflowStage, status: WorkflowStageStatus) {
+    setRepairWorkflow((current) => ({ ...current, [stage]: status }));
   }
 
   return (
@@ -258,6 +280,9 @@ function App() {
           </a>
           <a aria-label="Scan history" aria-current={activePage === "history" ? "page" : undefined} className={`nav-link ${activePage === "history" ? "selected" : ""}`} href="#history">
             <Clock3 size={17} /><span>Scan history</span>{activePage === "history" && <span className="nav-active-dot" />}
+          </a>
+          <a aria-label="Accessibility Assistant" aria-current={activePage === "assistant" ? "page" : undefined} className={`nav-link ${activePage === "assistant" ? "selected" : ""}`} href="#assistant">
+            <MessageSquareText size={17} /><span>Assistant</span>{activePage === "assistant" && <span className="nav-active-dot" />}
           </a>
         </nav>
 
@@ -323,6 +348,25 @@ function App() {
               </div>
             </section>
 
+            <section aria-label="Choose an accessibility workflow" className="demo-journeys">
+              <article className="demo-journey-card">
+                <span className="demo-journey-icon"><ScanLine aria-hidden="true" size={19} /></span>
+                <div>
+                  <h2>Accessibility Repair Engine</h2>
+                  <p>Scan a website, review detected problems, and follow the evidence through repair verification.</p>
+                  <a href="#scan">Start a website scan <ArrowUpRight aria-hidden="true" size={14} /></a>
+                </div>
+              </article>
+              <article className="demo-journey-card">
+                <span className="demo-journey-icon"><MessageSquareText aria-hidden="true" size={19} /></span>
+                <div>
+                  <h2>Accessibility Assistant</h2>
+                  <p>Explore a site with accessible text or voice interaction, captions, and safe shopping guidance.</p>
+                  <a href="#assistant">Open the Accessibility Assistant <ArrowUpRight aria-hidden="true" size={14} /></a>
+                </div>
+              </article>
+            </section>
+
             <section aria-label="Accessibility workflow" className="workflow-strip">
               <div className="workflow-heading"><GitBranch size={15} /><span>ACCESSIBILITY PIPELINE</span><span className="pipeline-live"><i /> EVIDENCE CERTIFICATES</span></div>
               <div className="workflow-steps">
@@ -357,35 +401,36 @@ function App() {
             className="app-page"
             hidden={activePage !== "scan"}
           >
-            <PageHeading
-              eyebrow="ACCESSIBILITY WORKSPACE / NEW SCAN"
-              title="Scan a real website"
-              description="Submit a public HTTP(S) URL to run the backend Playwright and axe-core scan."
-            />
+            <header className="workspace-page-heading">
+              <span className="panel-kicker">ACCESSIBILITY WORKSPACE / WEBSITE SCAN</span>
+              <h1>Accessibility Repair Engine</h1>
+              <p>Detect accessibility problems. Propose safe repairs. Verify the result.</p>
+            </header>
             <section className="scan-card" id="scan">
               <div className="scan-card-main">
                 <div className="scan-topline"><span className="scan-icon"><Globe2 size={17} /></span><span>START A NEW ASSESSMENT</span><span className="scan-protocol"><LockKeyhole size={11} /> SAFE BY DESIGN</span></div>
-                <h2>Bring a site into focus.</h2>
-                <p>Run axe-core against the rendered site. Only detected violations are reported—no scores or repairs are inferred.</p>
+                <h2>Find the barriers. Verify the fix.</h2>
+                <p>Run the existing Playwright and axe-core scan. Findings and repair evidence come from the backend.</p>
                 <form onSubmit={handleScan}>
-                  <label className="url-input-wrap" htmlFor="website-url">
+                  <label className="scan-input-label" htmlFor="website-url">Website URL or Website Name</label>
+                  <div className="url-input-wrap">
                     <Globe2 size={17} />
                     <input
                       autoComplete="url"
                       id="website-url"
                       onChange={(event) => setWebsiteUrl(event.target.value)}
-                      placeholder="https://your-website.com"
+                      placeholder="https://example.com or Flipkart"
                       required
-                      type="url"
+                      type="text"
                       value={websiteUrl}
                     />
-                    <span className="input-lock"><LockKeyhole size={12} /> PRIVATE</span>
-                  </label>
+                    <span className="input-lock"><LockKeyhole size={12} /> PUBLIC SITES</span>
+                  </div>
                   <div className="scan-actions">
                     <button aria-busy={isScanning} className="primary-button" disabled={isScanning || !websiteUrl.trim()} type="submit">
                       <ScanLine size={15} /> {isScanning ? "Scanning website…" : "Scan Website"}
                     </button>
-                    <span aria-live="polite" className="scan-duration">{isScanning ? "Opening site and running axe-core" : "Public HTTP(S) websites only"}</span>
+                    <span aria-live="polite" className="scan-duration">{isScanning ? "Opening the website and running accessibility checks" : "Use a public HTTP(S) URL, domain, or verified website name."}</span>
                   </div>
                 </form>
                 <div className="scan-actions upload-row">
@@ -401,6 +446,13 @@ function App() {
               </div>
             </section>
 
+            <ScanPipeline
+              scanStatus={isScanning ? "active" : scanResult ? "completed" : "not-started"}
+              repairWorkflow={repairWorkflow}
+            />
+
+            {isScanning && <ScanProgress />}
+
             {scanError && (
               <div className="scan-error" role="alert">
                 <Wifi size={16} />
@@ -408,7 +460,13 @@ function App() {
               </div>
             )}
 
-            {scanResult && <ScanResults result={scanResult} onWorkflowUpdate={() => void refreshDashboard()} />}
+            {scanResult && (
+              <ScanResults
+                result={scanResult}
+                onStageChange={updateRepairWorkflow}
+                onWorkflowUpdate={() => void refreshDashboard()}
+              />
+            )}
 
             <ProjectAnalysisPanel
               hindsight={hindsightSummary}
@@ -452,6 +510,7 @@ function App() {
               title="Recorded scan history"
               description="Historical findings loaded from persisted backend scan and Hindsight records."
             />
+            {activePage === "history" && <WebsiteHindsight />}
             <ScanHistoryPage
               summary={hindsightSummary}
               summaryError={hindsightError}
@@ -462,6 +521,17 @@ function App() {
               onRefresh={() => void refreshDashboard()}
             />
           </section>
+
+          {activePage === "assistant" && (
+            <section aria-label="Accessibility Assistant" className="app-page">
+              <PageHeading
+                eyebrow="ACCESSIBILITY WORKSPACE / USER INTERACTION"
+                title="Accessibility Assistant"
+                description="Interact with websites through accessible text commands and a persistent browser session. Commands requiring authentication or security verification are not performed."
+              />
+              <AccessibilityAssistant />
+            </section>
+          )}
 
           <footer className="page-footer">
             <span><span className="footer-mark"><Fingerprint size={13} /></span> ACCESSLAB <b>·</b> ACCESSIBILITY REPAIR ENGINE</span>
@@ -694,14 +764,70 @@ function ScanHistoryPage({
   );
 }
 
+function ScanPipeline({
+  scanStatus,
+  repairWorkflow,
+}: {
+  scanStatus: WorkflowStageStatus;
+  repairWorkflow: RepairWorkflowState;
+}) {
+  const stages: { label: string; status: WorkflowStageStatus }[] = [
+    { label: "SCAN", status: scanStatus },
+    { label: "DETECT", status: scanStatus === "completed" ? "completed" : "not-started" },
+    { label: "REPAIR", status: repairWorkflow.repair },
+    { label: "VERIFY", status: repairWorkflow.verify },
+    { label: "CERTIFY", status: repairWorkflow.certify },
+  ];
+  const statusLabels: Record<WorkflowStageStatus, string> = {
+    "not-started": "Not started",
+    active: "Active",
+    completed: "Completed",
+  };
+
+  return (
+    <section aria-label="Scan and repair pipeline" className="demo-pipeline">
+      <h2>Website scan to verified evidence</h2>
+      <ol>
+        {stages.map((stage, index) => (
+          <li className={`demo-pipeline-stage ${stage.status}`} key={stage.label}>
+            <span aria-hidden="true" className="pipeline-state-icon">
+              {stage.status === "completed" ? "✓" : stage.status === "active" ? "●" : "○"}
+            </span>
+            <span className="pipeline-stage-label">{stage.label}</span>
+            <span className="pipeline-stage-status">{statusLabels[stage.status]}</span>
+            {index < stages.length - 1 && <span aria-hidden="true" className="pipeline-connector">→</span>}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function ScanProgress() {
+  return (
+    <section aria-label="Scan progress" aria-live="polite" className="scan-progress">
+      <h2>Scanning website...</h2>
+      <ol>
+        <li><span aria-hidden="true">○</span><span>Website identified</span><span>Waiting for scan result</span></li>
+        <li><span aria-hidden="true">○</span><span>Website opened</span><span>Waiting for scan result</span></li>
+        <li className="active"><span aria-hidden="true">●</span><span>Running accessibility checks</span><span>In progress</span></li>
+        <li><span aria-hidden="true">○</span><span>Preparing results</span><span>Not started</span></li>
+      </ol>
+    </section>
+  );
+}
+
 function ScanResults({
   result,
+  onStageChange,
   onWorkflowUpdate,
 }: {
   result: ScanResponse;
+  onStageChange: (stage: RepairWorkflowStage, status: WorkflowStageStatus) => void;
   onWorkflowUpdate: () => void;
 }) {
   const [impactFilter, setImpactFilter] = useState<ImpactFilter>("All");
+  const host = result.final_url.replace(/^https?:\/\//i, "").split(/[/?#]/)[0] || result.final_url;
   const countImpact = (impact: string) =>
     result.violations.filter(
       (violation) =>
@@ -726,31 +852,42 @@ function ScanResults({
 
   return (
     <section aria-labelledby="scan-results-heading" className="scan-results">
-      <div className="results-header">
-        <div>
-          <span className="panel-kicker"><ScanLine size={13} /> AXE-CORE DETECTION</span>
-          <h2 id="scan-results-heading">{result.total_violations} violation{result.total_violations === 1 ? "" : "s"} found</h2>
-          <p className="results-page-title">{result.page_title || "Untitled page"}</p>
-          <a className="results-url" href={result.final_url} rel="noreferrer" target="_blank">{result.final_url}<ArrowUpRight size={12} /></a>
+      <div className="scan-complete-banner">
+        <div className="scan-complete-copy">
+          <span className="panel-kicker"><ScanLine size={14} /> ACCESSIBILITY SCAN COMPLETE</span>
+          <h2 id="scan-results-heading">{result.total_violations === 0 ? "✓ No supported accessibility violations detected" : `${result.total_violations} Issue${result.total_violations === 1 ? "" : "s"} Found`}</h2>
+          <p>{host || result.final_url}</p>
+          {result.page_title && <span className="scan-page-title">{result.page_title}</span>}
         </div>
         <span className={`results-count ${result.total_violations === 0 ? "clear" : ""}`}>
-          <strong>{result.total_violations}</strong><span>VIOLATIONS</span>
+          <strong>{result.total_violations}</strong><span>{result.total_violations === 1 ? "ISSUE" : "ISSUES"}</span>
         </span>
       </div>
-      <div className="wcag-summary" aria-label="Violation summary">
-        <SummaryItem label="TOTAL VIOLATIONS" value={result.total_violations} />
-        <SummaryItem label="CRITICAL" value={impactCounts.critical} />
-        <SummaryItem label="SERIOUS" value={impactCounts.serious} />
-        <SummaryItem label="MODERATE" value={impactCounts.moderate} />
-        <SummaryItem label="MINOR" value={impactCounts.minor} />
-        <SummaryItem label="AFFECTED ELEMENTS" value={affectedElementCount} />
-      </div>
+      <p className="scan-assistant-transition">
+        Need help interacting with a website?{" "}
+        <a href="#assistant">Open the Accessibility Assistant <ArrowUpRight aria-hidden="true" size={14} /></a>
+        {" "}·{" "}
+        <a href="#history">Review website history</a>
+      </p>
+      {result.total_violations > 0 && (
+        <div aria-label="Issues by severity" className="severity-summary">
+          <SeverityCard label="Critical" value={impactCounts.critical} icon="🔴" />
+          <SeverityCard label="Serious" value={impactCounts.serious} icon="🟠" />
+          <SeverityCard label="Moderate" value={impactCounts.moderate} icon="🟡" />
+          {impactCounts.minor > 0 && <SeverityCard label="Minor" value={impactCounts.minor} icon="🟢" />}
+          <div className="affected-total"><strong>{affectedElementCount}</strong><span>Affected elements</span></div>
+        </div>
+      )}
       {result.total_violations === 0 ? (
-        <div className="no-violations"><BadgeCheck size={19} /><span><strong>No axe-core violations found.</strong> This is not a guarantee of full WCAG conformance.</span></div>
+        <div className="no-violations"><BadgeCheck size={19} /><span><strong>No supported accessibility violations detected.</strong> Results are limited to the checks this scanner supports.</span></div>
       ) : (
         <>
+          <div className="problems-heading">
+            <div><span className="panel-kicker">SCAN FINDINGS</span><h2>🚨 Problems Found</h2></div>
+            <span>{result.total_violations} issue{result.total_violations === 1 ? "" : "s"} from this scan</span>
+          </div>
           <div className="violation-filters" role="group" aria-label="Filter violations by impact">
-            <span>FILTER BY SEVERITY</span>
+            <span>Filter by severity</span>
             {impactFilters.map((filter) => (
               <button
                 aria-pressed={impactFilter === filter}
@@ -774,6 +911,7 @@ function ScanResults({
               pageUrl={result.final_url}
               scanTimestamp={result.scanned_at}
               violation={violation}
+              onStageChange={onStageChange}
               onWorkflowUpdate={onWorkflowUpdate}
             />
           ))}
@@ -789,14 +927,17 @@ function ViolationCard({
   pageUrl,
   scanTimestamp,
   violation,
+  onStageChange,
   onWorkflowUpdate,
 }: {
   index: number;
   pageUrl: string;
   scanTimestamp: string;
   violation: ScanViolation;
+  onStageChange: (stage: RepairWorkflowStage, status: WorkflowStageStatus) => void;
   onWorkflowUpdate: () => void;
 }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [proposal, setProposal] = useState<RepairProposal | null>(null);
   const [isProposing, setIsProposing] = useState(false);
   const [proposalError, setProposalError] = useState("");
@@ -841,10 +982,13 @@ function ViolationCard({
     setApplicationError("");
     setCertificate(null);
     setCertificateError("");
+    onStageChange("repair", "active");
     try {
       setProposal(await proposeRepair(request));
+      onStageChange("repair", "completed");
       onWorkflowUpdate();
     } catch (error: unknown) {
+      onStageChange("repair", "not-started");
       setProposalError(
         error instanceof Error ? error.message : "The AI repair proposal failed.",
       );
@@ -877,10 +1021,13 @@ function ViolationCard({
     setApplicationError("");
     setCertificate(null);
     setCertificateError("");
+    onStageChange("verify", "active");
     try {
       setVerification(await verifyRepair(verificationRequest));
+      onStageChange("verify", "completed");
       onWorkflowUpdate();
     } catch (error: unknown) {
+      onStageChange("verify", "not-started");
       setVerificationError(
         error instanceof Error ? error.message : "Repair verification failed.",
       );
@@ -937,10 +1084,13 @@ function ViolationCard({
     setIsGeneratingCertificate(true);
     setCertificateError("");
     setCertificate(null);
+    onStageChange("certify", "active");
     try {
       setCertificate(await generateCertificate(request));
+      onStageChange("certify", "completed");
       onWorkflowUpdate();
     } catch (error: unknown) {
+      onStageChange("certify", "not-started");
       setCertificateError(error instanceof Error ? error.message : "Certificate generation failed.");
     } finally {
       setIsGeneratingCertificate(false);
@@ -969,66 +1119,133 @@ function ViolationCard({
     URL.revokeObjectURL(link.href);
   }
 
+  const affectedCount = violation.affected_node_count ?? violation.affected_nodes.length;
+  const selectors = Array.from(new Set([
+    ...violation.affected_nodes.flatMap((node) => node.selectors),
+    ...violation.css_selectors,
+    ...violation.affected_html_selectors,
+  ])).filter(Boolean).slice(0, 5);
+  const criterionAvailable = Boolean(
+    violation.wcag_criterion &&
+    violation.wcag_criterion.toLowerCase() !== "wcag mapping unavailable",
+  );
+  const levelAvailable = Boolean(
+    violation.wcag_level &&
+    violation.wcag_level.toLowerCase() !== "wcag mapping unavailable",
+  );
+  const impactedUsers = usersAffectedByRule(violation.rule_id ?? violation.id);
+  const targetSelector = selectors[0] ?? "Selector unavailable";
+
   return (
     <li className="violation-card">
-              <div className="violation-title-row">
-                <div><span className="violation-index">{String(index + 1).padStart(2, "0")}</span><h3>{violation.rule_id ?? violation.id}</h3></div>
-                <span className={`impact-badge ${(violation.impact ?? "unknown").toLowerCase()}`}>{violation.severity ?? violation.impact ?? "impact not reported"}</span>
-              </div>
-              <span className="violation-category">{violation.category ?? "Axe-core finding"}</span>
-              <p className="violation-description">{violation.description}</p>
-              <div className="wcag-explanation">
-                <strong>WCAG REQUIREMENT</strong>
-                <span>{violation.wcag_criterion ?? "WCAG mapping unavailable"}</span>
-                <span>Level {violation.wcag_level ?? "WCAG mapping unavailable"}</span>
-                <p><b>Why it matters:</b> {violation.explanation || violation.description}</p>
-              </div>
-              {violation.wcag_tags.length > 0 && (
-                <div className="violation-tags" aria-label="axe-core WCAG tags">
-                  {violation.wcag_tags.map((tag) => <span key={tag}>{tag}</span>)}
-                </div>
+      <article>
+        <div className="issue-card-heading">
+          <div>
+            <span className="issue-number">ISSUE {String(index + 1).padStart(2, "0")}</span>
+            <h3>{violation.category || violation.description || violation.rule_id || violation.id}</h3>
+          </div>
+          <span className={`impact-badge ${(violation.impact ?? violation.severity ?? "unknown").toLowerCase()}`}>
+            {violation.severity ?? violation.impact ?? "Severity not reported"}
+          </span>
+        </div>
+        <p className="issue-problem">{violation.description}</p>
+        <div className="issue-summary-facts">
+          <p><strong>WCAG</strong><span>{criterionAvailable ? `WCAG ${violation.wcag_criterion}` : "WCAG mapping unavailable"}</span></p>
+          <p><strong>Affected</strong><span>{affectedCount} affected element{affectedCount === 1 ? "" : "s"}</span></p>
+        </div>
+        <p className="issue-explanation">{violation.explanation || violation.help}</p>
+        <button
+          aria-controls={`issue-details-${index}`}
+          aria-expanded={detailsOpen}
+          className="view-details-button"
+          onClick={() => setDetailsOpen((open) => !open)}
+          type="button"
+        >
+          {detailsOpen ? "Hide Details" : "View Details"}
+        </button>
+        {detailsOpen && (
+          <section aria-label={`Details for issue ${index + 1}`} className="issue-detail-panel" id={`issue-details-${index}`}>
+            <div className="issue-detail-grid">
+              <section>
+                <h4>What is the problem?</h4>
+                <p>{violation.description}</p>
+              </section>
+              {violation.explanation && (
+                <section>
+                  <h4>Why does it matter?</h4>
+                  <p>{violation.explanation}</p>
+                </section>
               )}
-              <p className="violation-help">{violation.help}</p>
-              <div className="affected-elements">
-                <strong>AFFECTED ELEMENTS <span>{violation.affected_node_count ?? violation.affected_nodes.length} node{(violation.affected_node_count ?? violation.affected_nodes.length) === 1 ? "" : "s"}</span></strong>
-                {violation.affected_nodes.length === 0 ? (
-                  <p>No affected node details were returned by axe-core.</p>
-                ) : (
-                  violation.affected_nodes.map((node, nodeIndex) => (
-                    <div className="affected-node" key={`${node.selectors.join("-")}-${nodeIndex}`}>
-                      {node.selectors.map((selector) => <code className="selector-chip" key={selector}>{selector}</code>)}
-                      {node.html && <pre><code>{node.html}</code></pre>}
-                      {node.failure_summary && <p>{node.failure_summary}</p>}
-                    </div>
-                  ))
+              <section>
+                <h4>Where is the problem?</h4>
+                {selectors.length > 0 ? (
+                  <ul className="issue-selector-list">
+                    {selectors.map((selector) => <li key={selector}><code>{selector}</code></li>)}
+                  </ul>
+                ) : <p>Selector unavailable from scan evidence.</p>}
+              </section>
+              <section>
+                <h4>WCAG</h4>
+                <p>{criterionAvailable ? `WCAG ${violation.wcag_criterion}` : "WCAG mapping unavailable"}</p>
+                {levelAvailable && <p>Level {violation.wcag_level}</p>}
+                {violation.wcag_tags.length > 0 && (
+                  <p className="issue-wcag-tags">Rule tags: {violation.wcag_tags.join(", ")}</p>
                 )}
-              </div>
-              {violation.help_url && <a className="help-link" href={violation.help_url} rel="noreferrer" target="_blank">Read axe-core guidance <ArrowUpRight size={12} /></a>}
+              </section>
+              <section>
+                <h4>Affected elements</h4>
+                <p>{affectedCount} affected element{affectedCount === 1 ? "" : "s"} reported.</p>
+                {violation.affected_nodes.length > 0 && (
+                  <ul className="affected-evidence-list">
+                    {violation.affected_nodes.slice(0, 5).map((node, nodeIndex) => (
+                      <li key={`${node.selectors.join("-")}-${nodeIndex}`}>
+                        {node.selectors.length > 0 && <code>{node.selectors.join(", ")}</code>}
+                        {node.failure_summary && <p>{node.failure_summary}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {affectedCount > 5 && <p>Showing up to 5 of {affectedCount} reported elements.</p>}
+              </section>
+              {impactedUsers.length > 0 && (
+                <section>
+                  <h4>Who can be affected?</h4>
+                  <ul>{impactedUsers.map((user) => <li key={user}>{user}</li>)}</ul>
+                </section>
+              )}
+            </div>
+            {violation.help_url && (
+              <a className="help-link" href={violation.help_url} rel="noreferrer" target="_blank">
+                Read axe-core guidance <ArrowUpRight size={12} />
+              </a>
+            )}
+            <section aria-label="AI Repair" className="ai-repair-area">
+              <h4><Sparkles size={16} /> AI Repair</h4>
+              {!proposal && <p>AI can propose a repair for this issue.</p>}
               <button
                 className="propose-repair-button"
                 disabled={isProposing}
                 onClick={handleProposeRepair}
                 type="button"
               >
-                <Sparkles size={13} />
+                <Sparkles size={15} />
                 {isProposing ? "Generating proposal…" : proposal ? "Regenerate proposal" : "Propose Repair"}
               </button>
               {proposalError && <p className="proposal-error" role="alert">{proposalError}</p>}
               {proposal && (
                 <section className={`repair-proposal ${proposal.repair_type === "repair_not_safe" ? "unsafe" : ""}`} aria-label="AI repair proposal">
                   <div className="proposal-heading">
-                    <strong>AI PROPOSAL — NOT VERIFIED</strong>
-                    <span>{proposal.repair_type === "repair_not_safe" ? "No safe proposal available" : `${Math.round(proposal.confidence * 100)}% confidence`}</span>
+                    <strong>AI PROPOSAL — NOT YET VERIFIED</strong>
+                    {proposal.repair_type === "repair_not_safe" && <span>No safe proposal available</span>}
                   </div>
-                  <p>{proposal.explanation}</p>
-                  {proposal.repair_type !== "repair_not_safe" && (
-                    <div className="proposal-code-grid">
-                      <div><strong>ORIGINAL HTML</strong><pre><code>{proposal.original_html}</code></pre></div>
-                      <div><strong>PROPOSED HTML</strong><pre><code>{proposal.proposed_html}</code></pre></div>
-                    </div>
-                  )}
-                  <p className="proposal-reasoning"><b>Reasoning summary:</b> {proposal.reasoning_summary}</p>
-                  <span className="proposal-no-apply">This is a suggestion only. It has not been applied to the website.</span>
+                  <dl className="proposal-facts">
+                    <div><dt>Repair type</dt><dd>{proposal.repair_type}</dd></div>
+                    <div><dt>Target</dt><dd><code>{targetSelector}</code></dd></div>
+                  </dl>
+                  <p><strong>Proposed change</strong></p>
+                  {proposal.repair_type !== "repair_not_safe" && <pre className="proposed-change"><code>{proposal.proposed_html}</code></pre>}
+                  <p><strong>Rationale</strong><br />{proposal.reasoning_summary || proposal.explanation}</p>
+                  <p className="proposal-no-apply">This is a suggestion only. It has not been applied to the website.</p>
                   {proposal.repair_type !== "repair_not_safe" && (
                     <button
                       className="verify-repair-button"
@@ -1036,7 +1253,7 @@ function ViolationCard({
                       onClick={handleVerifyRepair}
                       type="button"
                     >
-                      {isVerifying ? "🔄 Verifying..." : "Verify Repair"}
+                      {isVerifying ? "Verifying repair…" : "Verify Repair"}
                     </button>
                   )}
                 </section>
@@ -1058,8 +1275,24 @@ function ViolationCard({
                 />
               )}
               {copyMessage && <p className="certificate-copy-message" aria-live="polite">{copyMessage}</p>}
+            </section>
+          </section>
+        )}
+      </article>
     </li>
   );
+}
+
+function usersAffectedByRule(ruleId: string): string[] {
+  const rule = ruleId.toLowerCase();
+  if (["image-alt", "input-image-alt", "role-img-alt"].includes(rule)) {
+    return ["Screen-reader users", "Blind or low-vision users"];
+  }
+  if (rule === "color-contrast") return ["Blind or low-vision users"];
+  if (["keyboard", "tabindex", "focus-order-semantics"].includes(rule)) {
+    return ["Keyboard-only users"];
+  }
+  return [];
 }
 
 function VerificationDisplay({
@@ -1085,21 +1318,32 @@ function VerificationDisplay({
   onGenerateCertificate: () => void;
   result: VerificationResult;
 }) {
+  const [certificateExpanded, setCertificateExpanded] = useState(false);
   const heading =
     result.status === "verified"
-      ? "✅ VERIFIED REPAIR"
+      ? "✓ VERIFIED"
       : result.status === "rejected"
-        ? "❌ REPAIR REJECTED"
-        : "⚠️ VERIFICATION FAILED";
+        ? "✕ REJECTED"
+        : "⚠ VERIFICATION FAILED";
+  const passedChecks = result.checks.filter((check) => check.passed).length;
   return (
     <section className={`verification-result ${result.status}`} aria-label="Repair verification result">
       <h4>{heading}</h4>
-      <p>{result.message}</p>
+      {result.status === "verified" ? (
+        <p>Verification checks: {passedChecks}/{result.checks.length} passed. {result.message}</p>
+      ) : (
+        <p>
+          {result.status === "rejected"
+            ? "The proposed repair did not pass verification."
+            : "The repair could not be safely verified."}{" "}
+          {result.message}
+        </p>
+      )}
       <dl>
         <div><dt>Original violation</dt><dd>{result.original_violation_present === null ? "Inconclusive" : result.original_violation_present ? "Present" : "Not present"}</dd></div>
-        <div><dt>Repaired violation</dt><dd>{result.repaired_violation_present === null ? "Inconclusive" : result.repaired_violation_present ? "Present" : "Resolved"}</dd></div>
+        <div><dt>Repair outcome</dt><dd>{result.original_violation_present === true && result.repaired_violation_present === false ? "Original violation: resolved" : result.repaired_violation_present === null ? "Inconclusive" : result.repaired_violation_present ? "Original violation remains" : "No original violation reported"}</dd></div>
         <div><dt>Safety / scope</dt><dd>{result.scope_safe ? "Safe" : "Unsafe / unconfirmed"}</dd></div>
-        <div><dt>New violations</dt><dd>{result.new_violations.length > 0 ? result.new_violations.join(", ") : "None detected"}</dd></div>
+        <div><dt>New violations</dt><dd>{result.new_violations.length > 0 ? result.new_violations.join(", ") : "New violations: none detected"}</dd></div>
       </dl>
       <strong className="verification-checks-title">CHECKS PERFORMED</strong>
       <ul>{result.checks.map((check) => (
@@ -1130,32 +1374,47 @@ function VerificationDisplay({
       )}
       {applicationError && <p className="proposal-error" role="alert">{applicationError}</p>}
       {application && <ApplicationDisplay result={application} />}
-      {certificate && (
-        <section className="certificate-details" aria-label="Accessibility certificate">
+      {certificate?.verification_status === "VERIFIED" && (
+        <section className="certificate-details" aria-label="Verified Accessibility Certificate">
           <div className="certificate-details-header">
-            <h5>✅ Verified Repair</h5>
-            <span>{certificate.verification_status}</span>
+            <h5>📜 Verified Accessibility Certificate</h5>
+            <span>Status: {certificate.verification_status}</span>
           </div>
-          <dl>
-            <div><dt>Certificate ID</dt><dd>{certificate.certificate_id}</dd></div>
-            <div><dt>Rule ID</dt><dd>{certificate.rule_id}</dd></div>
-            <div><dt>WCAG criterion</dt><dd>{certificate.wcag_criterion}</dd></div>
-            <div><dt>Checks passed</dt><dd>{certificate.checks.filter((check) => check.passed).length} / {certificate.checks.length}</dd></div>
-          </dl>
-          <p><b>Scope:</b> {certificate.scope}</p>
-          <p><b>Evidence SHA-256:</b> <code>{certificate.evidence_hash}</code></p>
-          <strong>LIMITATIONS</strong>
-          <ul>{certificate.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul>
-          <p className="certificate-statement">{certificate.certificate_statement}</p>
-          <div className="certificate-actions">
-            <button onClick={onCopyCertificate} type="button">Copy certificate JSON</button>
-            <button onClick={onExportCertificate} type="button">Export JSON</button>
-          </div>
-          <pre className="certificate-json"><code>{JSON.stringify(certificate, null, 2)}</code></pre>
+          <p><strong>Certificate ID</strong> <code>{certificate.certificate_id}</code></p>
+          <p><strong>Evidence hash</strong> <code title={certificate.evidence_hash}>{shortenHash(certificate.evidence_hash)}</code></p>
+          <button
+            aria-expanded={certificateExpanded}
+            className="view-certificate-button"
+            onClick={() => setCertificateExpanded((expanded) => !expanded)}
+            type="button"
+          >
+            {certificateExpanded ? "Hide Certificate" : "View Certificate"}
+          </button>
+          {certificateExpanded && (
+            <>
+              <dl>
+                <div><dt>Rule ID</dt><dd>{certificate.rule_id}</dd></div>
+                <div><dt>WCAG criterion</dt><dd>{certificate.wcag_criterion}</dd></div>
+                <div><dt>Checks passed</dt><dd>{certificate.checks.filter((check) => check.passed).length} / {certificate.checks.length}</dd></div>
+              </dl>
+              <p><b>Scope:</b> {certificate.scope}</p>
+              <strong>LIMITATIONS</strong>
+              <ul>{certificate.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul>
+              <p className="certificate-statement">{certificate.certificate_statement}</p>
+              <div className="certificate-actions">
+                <button onClick={onCopyCertificate} type="button">Copy certificate JSON</button>
+                <button onClick={onExportCertificate} type="button">Export JSON</button>
+              </div>
+            </>
+          )}
         </section>
       )}
     </section>
   );
+}
+
+function shortenHash(hash: string): string {
+  return hash.length > 24 ? `${hash.slice(0, 12)}…${hash.slice(-8)}` : hash;
 }
 
 function ApplicationDisplay({ result }: { result: RepairApplicationResult }) {
@@ -1223,8 +1482,14 @@ function ApplicationDisplay({ result }: { result: RepairApplicationResult }) {
   );
 }
 
-function SummaryItem({ label, value }: { label: string; value: number }) {
-  return <div className="summary-item"><strong>{value}</strong><span>{label}</span></div>;
+function SeverityCard({ label, value, icon }: { label: string; value: number; icon: string }) {
+  return (
+    <article className={`severity-card ${label.toLowerCase()}`}>
+      <span aria-hidden="true" className="severity-icon">{icon}</span>
+      <strong>{value}</strong>
+      <span>{label.toUpperCase()}</span>
+    </article>
+  );
 }
 
 export default App;

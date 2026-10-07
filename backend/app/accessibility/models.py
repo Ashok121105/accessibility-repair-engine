@@ -12,7 +12,7 @@ class ScanRequest(BaseModel):
         from urllib.parse import urlsplit
 
         if value != value.strip() or any(ord(character) < 32 for character in value):
-            raise ValueError("URL must not contain surrounding whitespace or control characters")
+            raise ValueError("Website input must not contain surrounding whitespace or control characters")
 
         try:
             parsed = urlsplit(value)
@@ -21,14 +21,19 @@ class ScanRequest(BaseModel):
         except ValueError as error:
             raise ValueError("Enter a valid public HTTP or HTTPS URL") from error
 
-        if (
-            parsed.scheme.lower() not in {"http", "https"}
-            or not parsed.netloc
-            or hostname is None
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ValueError("Enter a valid public HTTP or HTTPS URL")
+        if parsed.scheme:
+            if (
+                parsed.scheme.lower() not in {"http", "https"}
+                or not parsed.netloc
+                or hostname is None
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                raise ValueError("Enter a valid public HTTP or HTTPS URL")
+            return value
+
+        if any(character in value for character in "/?#@"):
+            raise ValueError("Enter a website name, domain, or valid public HTTP or HTTPS URL")
 
         return value
 

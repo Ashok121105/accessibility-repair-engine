@@ -302,3 +302,133 @@ def test_analyzer_does_not_claim_repair_without_resolved_application_evidence() 
     assert summary.failed_repairs == 1
     assert summary.recurring_issues[0].status == "RECURRING"
     assert not summary.recurring_issues[0].reappeared_after_repair
+
+
+def _website_history(website: str = WEBSITE) -> dict:
+    records = client.get("/api/hindsight/websites").json()
+    host = website.split("://", 1)[-1].split("/", 1)[0].removeprefix("www.")
+    record = next(item for item in records if item["domain"] == host)
+    response = client.get(f"/api/hindsight/websites/{record['website_id']}")
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_unified_history_creates_first_scan_record_with_compact_safe_finding_data() -> None:
+    timestamp = datetime.now(timezone.utc)
+    scan = scan_response(timestamp, rule_ids=("image-alt", "unknown-axe-rule"))
+    scan.violations[0].impact = "critical"
+    scan.violations[1].impact = "serious"
+    scan.violations[1].wcag_criterion = "WCAG mapping unavailable"
+    scan.violations[1].affected_nodes[0].html = '<input value="private-user-value">'
+    scan.violations[1].description = "Password private-user-value must never appear here."
+    scan.url = "https://example.com/account?token=private-user-value"
+    scan.final_url = "https://example.com/account?token=private-user-value"
+    dashboard_store.save_scan(scan)
+
+    websites_response = client.get("/api/hindsight/websites")
+    history = _website_history()
+
+    assert websites_response.status_code == 200
+    assert len(websites_response.json()) == 1
+    assert history["domain"] == "example.com"
+    assert history["comparison"] is None
+    assert history["scans"][0]["total_issues"] == 2
+    assert history["scans"][0]["critical"] == 1
+    assert history["scans"][0]["serious"] == 1
+    unknown = next(item for item in history["scans"][0]["issues"] if item["rule_id"] == "unknown-axe-rule")
+    assert unknown["wcag_criterion"] is None
+    assert "private-user-value" not in str(history)
+    assert "<input" not in str(history)
+    assert history["scans"][0]["original_url"] == "https://example.com/"
+    assert history["scans"][0]["website_url"] == "https://example.com/"
+    website_id = websites_response.json()[0]["website_id"]
+    assert client.get(f"/api/hindsight/websites/{website_id}/compare").status_code == 409
+    assert client.get(f"/api/hindsight/websites/{'0' * 64}").status_code == 404
+
+
+def test_unified_history_normalizes_scheme_and_www_and_compares_rule_sets() -> None:
+    now = datetime.now(timezone.utc)
+    add_scan(now - timedelta(minutes=2), ("image-alt", "link-name"), "https://www.example.com")
+    add_scan(now, ("image-alt", "button-name"), "http://example.com/")
+
+    websites = client.get("/api/hindsight/websites").json()
+    history = _website_history()
+    comparison = history["comparison"]
+
+    assert len(websites) == 1
+    assert websites[0]["scan_count"] == 2
+    assert history["domain"] == "example.com"
+    assert len(history["scans"]) == 2
+    assert comparison["previous_scan"]["total_issues"] == 2
+    assert comparison["current_scan"]["total_issues"] == 2
+    assert [issue["rule_id"] for issue in comparison["resolved"]] == ["link-name"]
+    assert [issue["rule_id"] for issue in comparison["still_present"]] == ["image-alt"]
+    assert [issue["rule_id"] for issue in comparison["new"]] == ["button-name"]
+    assert comparison["reappeared"] == []
+    assert history["insights"]
+    compare_response = client.get(
+        f"/api/hindsight/websites/{websites[0]['website_id']}/compare"
+    )
+    assert compare_response.status_code == 200
+    assert "previous_scan" in compare_response.json()
+    assert "scans" not in compare_response.json()
+    history_response = client.get(
+        f"/api/hindsight/websites/{websites[0]['website_id']}/history"
+    )
+    assert history_response.status_code == 200
+    assert len(history_response.json()["scans"]) == 2
+
+
+def test_unified_history_keeps_different_websites_separate() -> None:
+    now = datetime.now(timezone.utc)
+    add_scan(now - timedelta(minutes=1), website="https://one.example/")
+    add_scan(now, website="https://two.example/")
+
+    websites = client.get("/api/hindsight/websites").json()
+
+    assert {item["domain"] for item in websites} == {"one.example", "two.example"}
+    assert len({item["website_id"] for item in websites}) == 2
+
+
+def test_unified_history_marks_reappeared_only_after_verified_resolved_application() -> None:
+    add_scan(datetime.now(timezone.utc) - timedelta(minutes=3))
+    request, result, proposal = verification_data()
+    dashboard_store.save_proposal(
+        RepairProposalRequest(
+            violation_rule_id="image-alt",
+            violation_description="Image is missing alternative text.",
+            page_url=WEBSITE,
+        ),
+        proposal,
+    )
+    dashboard_store.save_verification_event(request, result)
+    add_application()
+    next_scan_time = datetime.now(timezone.utc) + timedelta(seconds=1)
+    add_scan(next_scan_time, rule_ids=())
+    add_scan(next_scan_time + timedelta(seconds=1), rule_ids=("image-alt",))
+
+    history = _website_history()
+    comparison = history["comparison"]
+
+    assert [issue["rule_id"] for issue in comparison["reappeared"]] == ["image-alt"]
+    assert comparison["new"] == []
+    repair = history["scans"][0]["repairs"][0]
+    assert repair["verification_status"] == "verified"
+    assert repair["original_violation_present"] is True
+    assert repair["repaired_violation_present"] is False
+    assert repair["verification_checks_passed"] == 1
+    assert any("previously verified repair" in insight for insight in history["insights"])
+
+
+def test_unified_history_does_not_call_unverified_return_a_reappearance() -> None:
+    add_scan(datetime.now(timezone.utc) - timedelta(minutes=2))
+    request, result, _ = verification_data("rejected")
+    dashboard_store.save_verification_event(request, result)
+    next_scan_time = datetime.now(timezone.utc) + timedelta(seconds=1)
+    add_scan(next_scan_time, rule_ids=())
+    add_scan(next_scan_time + timedelta(seconds=1))
+
+    comparison = _website_history()["comparison"]
+
+    assert comparison["reappeared"] == []
+    assert [issue["rule_id"] for issue in comparison["new"]] == ["image-alt"]

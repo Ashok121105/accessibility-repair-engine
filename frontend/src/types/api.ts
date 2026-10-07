@@ -9,6 +9,49 @@ export interface ScanRequest {
   url: string;
 }
 
+export interface AgentStartResponse {
+  success: boolean;
+  session_id: string;
+  status: "started";
+  message: string;
+  authentication?: {
+    status: "SIGNED_IN" | "SIGNED_OUT" | "UNKNOWN";
+    website: "flipkart";
+  };
+}
+
+export interface AgentCommandResponse {
+  success: boolean;
+  action: string;
+  message: string;
+  page_url: string;
+  details: Record<string, unknown>;
+  session_active: boolean;
+  website?: string | null;
+  url?: string | null;
+}
+
+export interface ShoppingProductSummary {
+  position: number;
+  name: string;
+  price: number | null;
+  currency: string | null;
+  rating: number | null;
+  review_count: number | null;
+  metadata: string | null;
+  url: string | null;
+  image_alt: string | null;
+}
+
+export interface AgentLanguagePreferences {
+  preferred_language: "en" | "te" | "hi" | "ta";
+  language_locked: boolean;
+}
+
+export interface AgentStopResponse {
+  status: "stopped";
+}
+
 export interface AffectedNode {
   selectors: string[];
   html: string;
@@ -284,6 +327,79 @@ export interface HindsightIssueHistory {
   status: "available" | "insufficient_history";
   rule_id: string;
   occurrences: HindsightOccurrence[];
+}
+
+export interface WebsiteIssueRecord {
+  fingerprint: string;
+  rule_id: string;
+  impact: string | null;
+  wcag_criterion: string | null;
+  affected_node_count: number;
+}
+
+export interface WebsiteRepairRecord {
+  rule_id: string;
+  repair_type: string | null;
+  verification_status: string | null;
+  verification_at: string | null;
+  original_violation_present: boolean | null;
+  repaired_violation_present: boolean | null;
+  verification_new_violation_count: number | null;
+  verification_checks_passed: number | null;
+  verification_checks_total: number | null;
+  application_status: string | null;
+  before_violation_count: number | null;
+  after_violation_count: number | null;
+  certificate_status: string | null;
+  certificate_id: string | null;
+  evidence_hash: string | null;
+}
+
+export interface WebsiteScanRecord {
+  scan_id: string;
+  original_url: string;
+  website_url: string;
+  domain: string;
+  scanned_at: string;
+  total_issues: number;
+  critical: number;
+  serious: number;
+  moderate: number;
+  minor: number;
+  detected_rule_ids: string[];
+  issues: WebsiteIssueRecord[];
+  repairs: WebsiteRepairRecord[];
+}
+
+export interface WebsiteHistorySummary {
+  website_id: string;
+  domain: string;
+  scan_count: number;
+  latest_scanned_at: string;
+  latest_total_issues: number;
+}
+
+export interface WebsiteIssueDelta {
+  fingerprint: string;
+  rule_id: string;
+  impact: string | null;
+}
+
+export interface WebsiteComparison {
+  previous_scan: WebsiteScanRecord;
+  current_scan: WebsiteScanRecord;
+  resolved: WebsiteIssueDelta[];
+  still_present: WebsiteIssueDelta[];
+  reappeared: WebsiteIssueDelta[];
+  new: WebsiteIssueDelta[];
+}
+
+export interface WebsiteHistoryDetail {
+  website_id: string;
+  domain: string;
+  scans: WebsiteScanRecord[];
+  comparison: WebsiteComparison | null;
+  insights: string[];
 }
 
 export interface ProjectAffectedElement {

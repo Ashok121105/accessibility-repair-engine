@@ -1,6 +1,10 @@
 import type {
   HealthResponse,
   AccessibilityCertificate,
+  AgentCommandResponse,
+  AgentLanguagePreferences,
+  AgentStartResponse,
+  AgentStopResponse,
   CertificateRequest,
   DashboardSummary,
   HindsightIssueHistory,
@@ -14,6 +18,8 @@ import type {
   ScanResponse,
   VerificationRequest,
   VerificationResult,
+  WebsiteHistoryDetail,
+  WebsiteHistorySummary,
 } from "../types/api";
 
 const API_BASE_URL =
@@ -56,6 +62,26 @@ export async function getHindsightIssueHistory(
     throw new Error(`Issue history retrieval failed (${response.status})`);
   }
   return (await response.json()) as HindsightIssueHistory;
+}
+
+export async function getHindsightWebsites(): Promise<WebsiteHistorySummary[]> {
+  const response = await fetch(`${API_BASE_URL}/api/hindsight/websites`);
+  if (!response.ok) {
+    throw new Error(`Website history retrieval failed (${response.status})`);
+  }
+  return (await response.json()) as WebsiteHistorySummary[];
+}
+
+export async function getHindsightWebsiteHistory(
+  websiteId: string,
+): Promise<WebsiteHistoryDetail> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/hindsight/websites/${encodeURIComponent(websiteId)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Website history retrieval failed (${response.status})`);
+  }
+  return (await response.json()) as WebsiteHistoryDetail;
 }
 
 export async function analyzeDeveloperProject(
@@ -145,6 +171,96 @@ export async function scanWebsite(url: string): Promise<ScanResponse> {
 
   return (await response.json()) as ScanResponse;
 }
+
+async function agentErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    if (
+      typeof body === "object" &&
+      body !== null &&
+      "detail" in body &&
+      typeof body.detail === "string"
+    ) {
+      return body.detail;
+    }
+    if (
+      typeof body === "object" &&
+      body !== null &&
+      "detail" in body &&
+      Array.isArray(body.detail)
+    ) {
+      const messages = body.detail.flatMap((issue: unknown) => (
+        typeof issue === "object" &&
+        issue !== null &&
+        "msg" in issue &&
+        typeof issue.msg === "string"
+          ? [issue.msg]
+          : []
+      ));
+      if (messages.length) return messages.join(". ");
+    }
+  } catch {
+    // Keep the status message when the API response is not JSON.
+  }
+  return fallback;
+}
+
+async function sendAgentRequest<T>(
+  endpoint: string,
+  payload: Record<string, string | boolean>,
+  fallback: string,
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/agent/${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new Error("Could not reach the assistant backend. Check that the backend is running and try again.");
+  }
+  if (!response.ok) {
+    throw new Error(await agentErrorMessage(response, `${fallback} (${response.status})`));
+  }
+  return (await response.json()) as T;
+}
+
+export function startAgent(url: string): Promise<AgentStartResponse> {
+  return sendAgentRequest<AgentStartResponse>(
+    "start",
+    { url },
+    "Could not start the assistant",
+  );
+}
+
+export function sendAgentCommand(
+  sessionId: string,
+  command: string,
+  languagePreferences?: AgentLanguagePreferences,
+): Promise<AgentCommandResponse> {
+  const payload: Record<string, string | boolean> = {
+    session_id: sessionId,
+    command,
+  };
+  if (languagePreferences) Object.assign(payload, languagePreferences);
+  return sendAgentRequest<AgentCommandResponse>(
+    "command",
+    payload,
+    "Could not send the command",
+  );
+}
+
+export function stopAgent(sessionId: string): Promise<AgentStopResponse> {
+  return sendAgentRequest<AgentStopResponse>(
+    "stop",
+    { session_id: sessionId },
+    "Could not stop the assistant",
+  );
+}
+
+export const startAccessibleAgent = startAgent;
+export const stopAccessibleAgent = stopAgent;
 
 export async function proposeRepair(
   request: RepairProposalRequest,
