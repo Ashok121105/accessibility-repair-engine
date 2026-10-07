@@ -92,6 +92,92 @@ def _landmark_descendants(node: dict[str, Any]) -> list[dict[str, Any]]:
     return descendants
 
 
+def _region_selector_matches_unique_target(
+    selector: str,
+    target: dict[str, Any],
+    context: _LandmarkTargetParser,
+) -> bool:
+    nodes_with_depth: list[tuple[dict[str, Any], int]] = []
+
+    def collect(node: dict[str, Any], depth: int) -> None:
+        nodes_with_depth.append((node, depth))
+        for child in node["children"]:
+            if isinstance(child, dict):
+                collect(child, depth + 1)
+
+    for root in context.roots:
+        collect(root, 0)
+    nodes = [node for node, _depth in nodes_with_depth]
+    if match := re.fullmatch(r"#([A-Za-z][A-Za-z0-9_-]*)", selector):
+        selected = [node for node in nodes if node["attrs"].get("id") == match.group(1)]
+    elif match := re.fullmatch(
+        r"(div|section|article)\.([A-Za-z][A-Za-z0-9_-]*)",
+        selector,
+    ):
+        selected = [
+            node
+            for node in nodes
+            if node["tag"] == match.group(1)
+            and match.group(2) in node["attrs"].get("class", "").split()
+        ]
+    elif selector == "article":
+        selected = [node for node in nodes if node["tag"] == "article"]
+    else:
+        return False
+
+    if len(selected) != 1 or selected[0]["attrs"] != target["attrs"]:
+        return False
+
+    qualifying: list[dict[str, Any]] = []
+    for node, _depth in nodes_with_depth:
+        descendants = _landmark_descendants(node)
+        has_heading = any(
+            re.fullmatch(r"h[1-6]", descendant["tag"])
+            for descendant in descendants
+        )
+        text_length = len(_landmark_node_text(node))
+        has_page_chrome = any(
+            descendant["tag"] in {"nav", "aside", "footer"}
+            or descendant["attrs"].get("role") in {"navigation", "complementary"}
+            for descendant in descendants
+        )
+        attrs = node["attrs"]
+        has_unique_id = bool(attrs.get("id")) and sum(
+            item["attrs"].get("id") == attrs["id"] for item in nodes
+        ) == 1
+        has_unique_class = any(
+            re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", name)
+            and sum(
+                item["tag"] == node["tag"]
+                and name in item["attrs"].get("class", "").split()
+                for item in nodes
+            ) == 1
+            for name in attrs.get("class", "").split()
+        )
+        is_unique_article = node["tag"] == "article" and sum(
+            item["tag"] == "article" for item in nodes
+        ) == 1
+        if (
+            node["tag"] in {"div", "section", "article"}
+            and (has_unique_id or has_unique_class or is_unique_article)
+            and has_heading
+            and text_length >= 30
+            and not has_page_chrome
+        ):
+            qualifying.append(node)
+
+    selected_node = selected[0]
+    if selected_node not in qualifying:
+        return False
+    selected_descendants = _landmark_descendants(selected_node)
+    return not any(
+        node not in selected_descendants
+        and selected_node not in _landmark_descendants(node)
+        for node in qualifying
+        if node is not selected_node
+    )
+
+
 def _has_deterministic_landmark_target(request: RepairProposalRequest) -> bool:
     if (
         not request.context_html
@@ -126,6 +212,13 @@ def _has_deterministic_landmark_target(request: RepairProposalRequest) -> bool:
     text_length = len(" ".join(" ".join(parser.text_parts).split()))
     if text_length < 30:
         return False
+
+    if request.violation_rule_id == "region":
+        return _region_selector_matches_unique_target(
+            request.css_selector,
+            parser.roots[0],
+            context_parser,
+        )
 
     identity_values = [
         parser.root_attrs.get("id", ""),

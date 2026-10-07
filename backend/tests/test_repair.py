@@ -415,6 +415,28 @@ def region_request() -> RepairProposalRequest:
     )
 
 
+def generic_region_request() -> RepairProposalRequest:
+    target = (
+        '<div class="translation-content"><h2>Translations</h2>'
+        '<p lang="en">Existing English content for this page.</p>'
+        '<p lang="fr">Existing French content for this page.</p></div>'
+    )
+    return RepairProposalRequest(
+        violation_rule_id="region",
+        wcag_criterion="1.3.1 Info and Relationships",
+        violation_description="Some page content is not contained by landmarks.",
+        affected_html=target,
+        css_selector="div.translation-content",
+        context_html=(
+            "<header><h2>Example site</h2></header>"
+            "<nav><a href='/'>Home</a></nav>"
+            f'<section class="article-wrapper">{target}</section>'
+            "<footer>Contact information</footer>"
+        ),
+        page_url="https://example.com",
+    )
+
+
 @pytest.mark.anyio
 async def test_region_repair_is_deterministic_for_scanner_selected_container() -> None:
     region = region_request()
@@ -425,6 +447,17 @@ async def test_region_repair_is_deterministic_for_scanner_selected_container() -
     assert proposal.original_html == region.affected_html
     assert proposal.proposed_html == f"<main>{region.affected_html}</main>"
     assert "preserved exactly" in proposal.reasoning_summary
+
+
+@pytest.mark.anyio
+async def test_region_repair_accepts_unique_nested_container_with_a_generic_class() -> None:
+    request_data = generic_region_request()
+
+    proposal = await service.propose_repair(request_data, None)
+
+    assert proposal.repair_type == "landmark_addition"
+    assert proposal.original_html == request_data.affected_html
+    assert proposal.proposed_html == f"<main>{request_data.affected_html}</main>"
 
 
 @pytest.mark.anyio

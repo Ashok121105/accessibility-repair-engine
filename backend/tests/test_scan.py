@@ -431,6 +431,8 @@ async def test_region_scan_selects_one_existing_container_covering_all_affected_
                         "hasHeading": True,
                         "textLength": 90,
                         "coversTargets": True,
+                        "depth": 2,
+                        "containsLandmarkChrome": False,
                     }
                 ],
             }
@@ -496,6 +498,32 @@ async def test_landmark_page_evidence_is_sanitized_without_changing_target_conte
 
             assert region_target is not None
             assert region_target[0].startswith('<div id="main-content">')
+
+            await page.set_content(
+                "<header><h2>Example site</h2></header>"
+                "<nav><a href='/'>Home</a></nav>"
+                '<section class="article-wrapper">'
+                '<div class="translation-content"><h2>Translations</h2>'
+                '<p lang="en">Existing English content for this page.</p>'
+                '<p lang="fr">Existing French content for this page.</p>'
+                "</div></section>"
+                "<footer>Contact information</footer>"
+            )
+            generic_region_evidence = await page.evaluate(
+                LANDMARK_CANDIDATE_SCRIPT,
+                {
+                    "targetSelectorGroups": [
+                        ['p[lang="en"]'],
+                        ['p[lang="fr"]'],
+                    ]
+                },
+            )
+            generic_region_target = _region_repair_target(generic_region_evidence)
+
+            assert generic_region_target is not None
+            assert generic_region_target[1] == "div.translation-content"
+            assert generic_region_target[0].startswith('<div class="translation-content">')
+            assert "nav" not in generic_region_target[0]
         finally:
             await browser.close()
 

@@ -635,6 +635,99 @@ describe("dashboard", () => {
     });
   });
 
+  it("blocks a region proposal when the scan has no safe container evidence", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const originalImplementation = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/api/scan")) {
+        const response = await originalImplementation(input, init);
+        const payload = await response.json();
+        payload.violations[0] = {
+          ...payload.violations[0],
+          id: "region",
+          rule_id: "region",
+          description: "Some page content is not contained by landmarks.",
+          affected_nodes: [{
+            selectors: ['p[lang="en"]'],
+            html: '<p lang="en">Some unlandmarked content from the scan.</p>',
+          }],
+        };
+        return new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return originalImplementation(input, init);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await openNewScan(user);
+    await user.type(screen.getByRole("textbox", { name: "Website URL or Website Name" }), "https://example.com");
+    await user.click(screen.getByRole("button", { name: /^scan website$/i }));
+    await screen.findByRole("heading", { name: "1 Issue Found" });
+    await openIssueDetails(user);
+    await user.click(screen.getByRole("button", { name: "Propose Repair" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This scan did not identify one safe content container. Run a new scan to refresh landmark evidence; no proposal was requested.",
+    );
+    expect(fetchMock.mock.calls.some(([input]) => (
+      String(input).endsWith("/api/repair/propose")
+    ))).toBe(false);
+  });
+
+  it("sends the scanner-selected region container instead of an affected paragraph", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const originalImplementation = fetchMock.getMockImplementation()!;
+    const targetHtml =
+      '<div class="translation-content"><h2>Translations</h2><p lang="en">Existing English text for visitors.</p></div>';
+    const contextHtml =
+      `<header><h2>Site name</h2></header><section class="article-wrapper">${targetHtml}</section><footer>Contact</footer>`;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/api/scan")) {
+        const response = await originalImplementation(input, init);
+        const payload = await response.json();
+        payload.violations[0] = {
+          ...payload.violations[0],
+          id: "region",
+          rule_id: "region",
+          description: "Some page content is not contained by landmarks.",
+          affected_nodes: [{
+            selectors: ['p[lang="en"]'],
+            html: '<p lang="en">Existing English text for visitors.</p>',
+            repair_target_html: targetHtml,
+            repair_target_selector: "div.translation-content",
+            repair_context_html: contextHtml,
+          }],
+        };
+        return new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return originalImplementation(input, init);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await openNewScan(user);
+    await user.type(screen.getByRole("textbox", { name: "Website URL or Website Name" }), "https://example.com");
+    await user.click(screen.getByRole("button", { name: /^scan website$/i }));
+    await screen.findByRole("heading", { name: "1 Issue Found" });
+    await openIssueDetails(user);
+    await user.click(screen.getByRole("button", { name: "Propose Repair" }));
+    await screen.findByText("AI PROPOSAL — NOT YET VERIFIED");
+
+    const repairCall = fetchMock.mock.calls.find(([input]) => (
+      String(input).endsWith("/api/repair/propose")
+    ));
+    expect(JSON.parse(String(repairCall?.[1]?.body))).toMatchObject({
+      violation_rule_id: "region",
+      affected_html: targetHtml,
+      css_selector: "div.translation-content",
+      context_html: contextHtml,
+    });
+  });
+
   it("shows independent verification results after a proposal", async () => {
     const user = userEvent.setup();
     render(<App />);

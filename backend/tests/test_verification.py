@@ -408,6 +408,45 @@ async def test_region_repair_can_add_main_around_unchanged_content() -> None:
 
 
 @pytest.mark.anyio
+async def test_region_verification_accepts_unique_generic_class_target() -> None:
+    original_html = (
+        '<div class="translation-content"><h2>Translations</h2>'
+        '<p lang="en">Existing English content for this page.</p>'
+        '<p lang="fr">Existing French content for this page.</p></div>'
+    )
+    proposed_html = f"<main>{original_html}</main>"
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="region",
+        selector="div.translation-content",
+        wcag_criterion="1.3.1 Info and Relationships",
+        context_html=(
+            "<header><h2>Example site</h2></header>"
+            "<nav><a href='/'>Home</a></nav>"
+            f'<section class="article-wrapper">{original_html}</section>'
+            "<footer>Contact information</footer>"
+        ),
+        repair_proposal=RepairProposal(
+            repair_type="landmark_addition",
+            explanation="Wrap the unchanged translations in a main landmark.",
+            original_html=original_html,
+            proposed_html=proposed_html,
+            confidence=1,
+            reasoning_summary="The scanner selected the unique content container.",
+        ),
+    )
+
+    result = await sandbox.verify_repair(request)
+
+    assert result.status == "verified", result.model_dump()
+    assert result.original_violation_present is True
+    assert result.repaired_violation_present is False
+    assert result.scope_safe is True
+    assert all(check.passed for check in result.checks)
+
+
+@pytest.mark.anyio
 async def test_region_repair_without_page_context_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

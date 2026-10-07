@@ -1007,23 +1007,46 @@ function ViolationCard({
 
   async function handleProposeRepair() {
     const affectedNode = violation.affected_nodes[0];
+    const proposalRuleId = violation.rule_id ?? violation.id;
+    const repairTargetHtml = affectedNode?.repair_target_html;
+    const repairTargetSelector = affectedNode?.repair_target_selector;
+    const repairContextHtml = affectedNode?.repair_context_html;
+    if (
+      proposalRuleId === "region" &&
+      (
+        !repairTargetHtml?.trim() ||
+        !repairTargetSelector?.trim() ||
+        !repairContextHtml?.trim()
+      )
+    ) {
+      setProposalError(
+        "This scan did not identify one safe content container. Run a new scan to refresh landmark evidence; no proposal was requested.",
+      );
+      return;
+    }
     const request: RepairProposalRequest = {
-      violation_rule_id: violation.rule_id ?? violation.id,
+      violation_rule_id: proposalRuleId,
       wcag_criterion: violation.wcag_criterion ?? "WCAG mapping unavailable",
       violation_description: violation.description,
       affected_html:
-        affectedNode?.repair_target_html ??
-        affectedNode?.html ??
-        violation.affected_html_elements[0] ??
-        "",
+        proposalRuleId === "region"
+          ? repairTargetHtml ?? ""
+          : affectedNode?.repair_target_html ??
+            affectedNode?.html ??
+            violation.affected_html_elements[0] ??
+            "",
       css_selector:
-        affectedNode?.repair_target_selector ??
-        affectedNode?.selectors[0] ??
-        violation.css_selectors[0] ??
-        violation.affected_html_selectors[0] ??
-        "",
+        proposalRuleId === "region"
+          ? repairTargetSelector ?? ""
+          : affectedNode?.repair_target_selector ??
+            affectedNode?.selectors[0] ??
+            violation.css_selectors[0] ??
+            violation.affected_html_selectors[0] ??
+            "",
       context: affectedNode?.failure_summary ?? "",
-      context_html: affectedNode?.repair_context_html ?? "",
+      context_html: proposalRuleId === "region"
+        ? repairContextHtml ?? ""
+        : affectedNode?.repair_context_html ?? "",
       page_url: pageUrl,
     };
 

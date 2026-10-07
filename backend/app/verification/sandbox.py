@@ -343,7 +343,7 @@ async def _run_landmark_pair(
                 wait_until="domcontentloaded",
             )
             initial_state = await page.evaluate(
-                """({contextHtml, originalHtml, selector}) => {
+                """({contextHtml, originalHtml, selector, ruleId}) => {
                   const root = document.querySelector("#repair-sandbox");
                   const template = document.createElement("template");
                   template.innerHTML = contextHtml;
@@ -365,6 +365,37 @@ async def _run_landmark_pair(
                     target.tagName.toLowerCase() === "article" &&
                     identities.length === 0 &&
                     selector === "article";
+                  const isRegion = ruleId === "region";
+                  const regionCandidates = [...root.querySelectorAll("div,section,article")]
+                    .map((element) => {
+                      const idSelector = element.id ? `#${CSS.escape(element.id)}` : "";
+                      const uniqueClass = [...element.classList].find((name) => {
+                        const classSelector = `${element.tagName.toLowerCase()}.${CSS.escape(name)}`;
+                        return root.querySelectorAll(classSelector).length === 1;
+                      });
+                      const hasUniqueId = idSelector && root.querySelectorAll(idSelector).length === 1;
+                      const isUniqueArticle =
+                        element.tagName.toLowerCase() === "article" &&
+                        root.querySelectorAll("article").length === 1;
+                      const hasHeading = Boolean(element.querySelector("h1,h2,h3,h4,h5,h6"));
+                      const textLength = (element.textContent || "").trim().replace(/\\s+/g, " ").length;
+                      const hasPageChrome = Boolean(
+                        element.querySelector("nav,aside,footer,[role='navigation'],[role='complementary']")
+                      );
+                      return {
+                        element,
+                        eligible: Boolean(hasUniqueId || uniqueClass || isUniqueArticle) &&
+                          hasHeading && textLength >= 30 && !hasPageChrome,
+                      };
+                    })
+                    .filter((candidate) => candidate.eligible);
+                  const regionTargetIsUnique =
+                    regionCandidates.some((candidate) => candidate.element === target) &&
+                    !regionCandidates.some((candidate) =>
+                      candidate.element !== target &&
+                      !target.contains(candidate.element) &&
+                      !candidate.element.contains(target)
+                    );
                   const candidates = [...root.querySelectorAll("div,section,article")].filter((element) => {
                     const tokens = [
                       ...(element.id ? [element.id] : []),
@@ -380,12 +411,14 @@ async def _run_landmark_pair(
                   });
                   return {
                     safe: ["div", "section", "article"].includes(target.tagName.toLowerCase()) &&
-                      (identities.length === 1 || targetIsSemanticArticle) &&
                       target.querySelector("h1,h2,h3,h4,h5,h6") !== null &&
                       (target.textContent || "").trim().replace(/\\s+/g, " ").length >= 30 &&
                       target.outerHTML === originalHtml &&
-                      candidates.length === 1 &&
-                      candidates[0] === target &&
+                      (isRegion
+                        ? regionTargetIsUnique
+                        : (identities.length === 1 || targetIsSemanticArticle) &&
+                          candidates.length === 1 &&
+                          candidates[0] === target) &&
                       root.querySelectorAll("main").length === 0,
                     contextHtml: root.innerHTML,
                   };
@@ -394,6 +427,7 @@ async def _run_landmark_pair(
                     "contextHtml": request.context_html,
                     "originalHtml": request.original_html,
                     "selector": request.selector,
+                    "ruleId": request.rule_id,
                 },
             )
             if not initial_state["safe"]:

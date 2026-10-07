@@ -63,6 +63,10 @@ LANDMARK_CANDIDATE_SCRIPT = """(options = {}) => {
       .filter((name) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(name) && signalPattern.test(name.replace(/[-_]/g, "")))
       .map((name) => `${element.tagName.toLowerCase()}.${name}`)
       .find((selector) => document.querySelectorAll(selector).length === 1) || "";
+    const uniqueClassSelector = [...element.classList]
+      .filter((name) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(name))
+      .map((name) => `${element.tagName.toLowerCase()}.${name}`)
+      .find((selector) => document.querySelectorAll(selector).length === 1) || "";
     const semanticArticleSelector =
       element.tagName.toLowerCase() === "article" &&
       identityMatches === 0 &&
@@ -71,7 +75,7 @@ LANDMARK_CANDIDATE_SCRIPT = """(options = {}) => {
       ? "article"
       : idSelector && document.querySelectorAll(idSelector).length === 1
         ? idSelector
-        : classSelector;
+        : classSelector || uniqueClassSelector;
     const coversTargets = targetSelectorGroups.length > 0 &&
       targetSelectorGroups.every((selectors) => {
         if (!Array.isArray(selectors) || selectors.length === 0) return false;
@@ -95,6 +99,12 @@ LANDMARK_CANDIDATE_SCRIPT = """(options = {}) => {
       textLength,
       identityMatches,
       coversTargets,
+      depth: (() => {
+        let depth = 0;
+        for (let current = element; current && current !== body; current = current.parentElement) depth += 1;
+        return depth;
+      })(),
+      containsLandmarkChrome: Boolean(element.querySelector("nav,aside,footer,[role='navigation'],[role='complementary']")),
     };
   });
   return {
@@ -250,15 +260,7 @@ def _region_repair_target(
         for candidate in candidates
         if isinstance(candidate, dict)
         and candidate.get("tag") in {"div", "section", "article"}
-        and candidate.get("coversTargets") is True
-        and (
-            candidate.get("identityMatches") == 1
-            or (
-                candidate.get("tag") == "article"
-                and candidate.get("identityMatches") == 0
-                and candidate.get("selector") == "article"
-            )
-        )
+        and candidate.get("containsLandmarkChrome") is False
         and candidate.get("hasHeading") is True
         and candidate.get("unchanged") is True
         and isinstance(candidate.get("textLength"), int)
@@ -269,9 +271,31 @@ def _region_repair_target(
         and candidate["html"]
         and context_html.count(candidate["html"]) == 1
     ]
-    if len(qualifying) != 1:
+    target_candidates = [
+        candidate for candidate in qualifying
+        if candidate.get("coversTargets") is True
+    ]
+    if not target_candidates:
         return None
-    candidate = qualifying[0]
+    deepest = max(
+        candidate.get("depth", 0)
+        for candidate in target_candidates
+        if isinstance(candidate.get("depth", 0), int)
+    )
+    deepest_candidates = [
+        candidate for candidate in target_candidates
+        if candidate.get("depth", 0) == deepest
+    ]
+    if len(deepest_candidates) != 1:
+        return None
+    candidate = deepest_candidates[0]
+    candidate_html = candidate["html"]
+    if any(
+        other["html"] not in candidate_html and candidate_html not in other["html"]
+        for other in qualifying
+        if other is not candidate
+    ):
+        return None
     selector = candidate["selector"]
     if not re.fullmatch(
         r"(?:#[A-Za-z][A-Za-z0-9_-]*|(?:div|section|article)\.[A-Za-z][A-Za-z0-9_-]*|article)",
