@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -16,6 +17,8 @@ GEMINI_API_URL = (
     f"{GEMINI_MODEL}:generateContent"
 )
 GEMINI_TIMEOUT_SECONDS = 30
+GEMINI_MAX_RETRIES = 2
+GEMINI_RETRY_BACKOFF_SECONDS = 0.5
 LANDMARK_CONTAINER_SIGNAL = re.compile(
     r"^(main|content|contentarea|maincontent|primarycontent|pagecontent|sitecontent)$",
     re.IGNORECASE,
@@ -411,12 +414,25 @@ async def propose_repair(
 
     try:
         async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                GEMINI_API_URL,
-                headers={"x-goog-api-key": api_key},
-                json=payload,
-            )
-            response.raise_for_status()
+            for attempt in range(GEMINI_MAX_RETRIES + 1):
+                response = await client.post(
+                    GEMINI_API_URL,
+                    headers={"x-goog-api-key": api_key},
+                    json=payload,
+                )
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as error:
+                    if (
+                        error.response.status_code != 503
+                        or attempt == GEMINI_MAX_RETRIES
+                    ):
+                        raise
+                    await asyncio.sleep(
+                        GEMINI_RETRY_BACKOFF_SECONDS * (2**attempt)
+                    )
+                else:
+                    break
     except httpx.TimeoutException as error:
         raise GeminiTimeout("Gemini did not respond before the timeout") from error
     except httpx.HTTPError as error:

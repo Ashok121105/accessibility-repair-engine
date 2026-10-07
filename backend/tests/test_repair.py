@@ -43,11 +43,16 @@ def valid_proposal(**overrides: object) -> dict[str, object]:
 
 
 class FakeResponse:
-    def __init__(self, payload: object) -> None:
+    def __init__(self, payload: object, status_code: int = 200) -> None:
         self.payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
-        return None
+        response = httpx.Response(
+            self.status_code,
+            request=httpx.Request("POST", service.GEMINI_API_URL),
+        )
+        response.raise_for_status()
 
     def json(self) -> object:
         return self.payload
@@ -70,6 +75,32 @@ def mock_gemini(monkeypatch: pytest.MonkeyPatch, payload: object) -> list[dict[s
         async def post(self, url: str, *, headers: dict[str, str], json: object) -> FakeResponse:
             posted.append({"url": url, "headers": headers, "json": json})
             return FakeResponse(payload)
+
+    monkeypatch.setattr(service.httpx, "AsyncClient", FakeClient)
+    return posted
+
+
+def mock_gemini_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[FakeResponse],
+) -> list[dict[str, object]]:
+    posted: list[dict[str, object]] = []
+    response_iter = iter(responses)
+
+    class FakeClient:
+        def __init__(self, timeout: float) -> None:
+            assert timeout == service.GEMINI_TIMEOUT_SECONDS
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            assert len(args) == 3
+            return None
+
+        async def post(self, url: str, *, headers: dict[str, str], json: object) -> FakeResponse:
+            posted.append({"url": url, "headers": headers, "json": json})
+            return next(response_iter)
 
     monkeypatch.setattr(service.httpx, "AsyncClient", FakeClient)
     return posted
@@ -188,6 +219,80 @@ async def test_gemini_provider_failure_is_reported(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(service.GeminiFailure, match="could not generate"):
         await service.propose_repair(request(), "test-secret")
+
+
+@pytest.mark.anyio
+async def test_gemini_503_retries_and_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted = mock_gemini_responses(
+        monkeypatch,
+        [
+            FakeResponse({}, status_code=503),
+            FakeResponse(gemini_text_response(json.dumps(valid_proposal()))),
+        ],
+    )
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(service.asyncio, "sleep", fake_sleep)
+
+    proposal = await service.propose_repair(request(), "test-secret")
+
+    assert proposal.repair_type == "add_alt_attribute"
+    assert len(posted) == 2
+    assert delays == [service.GEMINI_RETRY_BACKOFF_SECONDS]
+
+
+@pytest.mark.anyio
+async def test_gemini_503_exhausts_retries_and_returns_generic_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted = mock_gemini_responses(
+        monkeypatch,
+        [FakeResponse({}, status_code=503) for _ in range(service.GEMINI_MAX_RETRIES + 1)],
+    )
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(service.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(service.GeminiFailure, match="could not generate"):
+        await service.propose_repair(request(), "test-secret")
+
+    assert len(posted) == service.GEMINI_MAX_RETRIES + 1
+    assert delays == [
+        service.GEMINI_RETRY_BACKOFF_SECONDS * (2**attempt)
+        for attempt in range(service.GEMINI_MAX_RETRIES)
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404])
+async def test_gemini_client_errors_are_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    posted = mock_gemini_responses(
+        monkeypatch,
+        [FakeResponse({}, status_code=status_code)],
+    )
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(service.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(service.GeminiFailure, match="could not generate"):
+        await service.propose_repair(request(), "test-secret")
+
+    assert len(posted) == 1
+    assert delays == []
 
 
 @pytest.mark.anyio
