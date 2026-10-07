@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 import stat
 import zipfile
 
@@ -201,6 +202,63 @@ def test_valid_html_zip_runs_analysis_and_maps_exact_source_line(
     assert summary.total_scans_analyzed == 1
     assert summary.new_issues[0].source_type == "project"
     assert summary.new_issues[0].project_id == result["project_id"]
+
+
+@pytest.mark.anyio
+async def test_project_image_alt_scan_verifies_actual_affected_fragment() -> None:
+    from backend.app.repair.models import RepairProposal
+    from backend.app.verification.models import VerificationRequest
+    from backend.app.verification.sandbox import verify_repair
+
+    demo_html = (
+        Path(__file__).resolve().parents[2]
+        / "sample-sites"
+        / "broken-site"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+    analysis = await analyzer.analyze_project_zip(
+        make_zip({"index.html": demo_html.encode()}),
+        "accessibility-demo.zip",
+    )
+
+    violation = next(
+        violation
+        for page in analysis.pages
+        for violation in page.violations
+        if violation.rule_id == "image-alt"
+    )
+    element = violation.affected_elements[0]
+    original_html = element.html
+    proposed_html = original_html[:-1] + ' alt="Blue square">'
+    proposal = RepairProposal(
+        repair_type="add_alt_attribute",
+        explanation="Add a text alternative.",
+        original_html=original_html,
+        proposed_html=proposed_html,
+        confidence=0.9,
+        reasoning_summary="Adds only the missing alt attribute.",
+    )
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id=violation.rule_id,
+        selector=element.selector,
+        wcag_criterion=violation.wcag_criterion,
+        wcag_level=violation.wcag_level,
+        website=analysis.project_url,
+        repair_proposal=proposal,
+    )
+
+    result = await verify_repair(request)
+
+    assert analysis.analysis_status == "completed"
+    assert violation.rule_id == "image-alt"
+    assert result.status == "verified"
+    assert result.rule_id == "image-alt"
+    assert result.original_violation_present is True
+    assert result.repaired_violation_present is False
+    assert result.scope_safe is True
+    assert result.new_violations == []
 
 
 def test_source_mapping_is_unavailable_when_rendered_html_cannot_be_matched(

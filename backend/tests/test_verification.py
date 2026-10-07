@@ -192,6 +192,29 @@ async def test_unknown_rule_fails_closed(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("rule_id", ["landmark-one-main", "heading-order"])
+async def test_unsupported_landmark_and_heading_rules_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    rule_id: str,
+) -> None:
+    async def unexpected_scan(request: VerificationRequest) -> object:
+        assert request.rule_id == rule_id
+        raise AssertionError("Unsupported rules must not reach axe-core")
+
+    monkeypatch.setattr(sandbox, "_run_pair", unexpected_scan)
+
+    result = await sandbox.verify_repair(verification_request(rule_id=rule_id))
+
+    assert result.status == "verification_failed"
+    assert result.rule_id == rule_id
+    assert result.original_violation_present is None
+    assert result.repaired_violation_present is None
+    assert result.scope_safe is False
+    assert result.checks[0].name == "supported_rule"
+    assert result.checks[0].passed is False
+
+
+@pytest.mark.anyio
 async def test_verifier_runtime_failure_returns_verification_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
