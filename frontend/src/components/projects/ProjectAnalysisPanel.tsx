@@ -113,11 +113,17 @@ export default function ProjectAnalysisPanel({
   ) {
     const element = violation.affected_elements[0];
     if (!project?.project_url || !element) return;
+    let affectedHtml = element.repair_target_html ?? element.html;
+    if (violation.rule_id === "landmark-one-main") {
+      const landmarkTargetHtml = element.repair_target_html?.trim();
+      if (!landmarkTargetHtml) return;
+      affectedHtml = landmarkTargetHtml;
+    }
     const request: RepairProposalRequest = {
       violation_rule_id: violation.rule_id,
       wcag_criterion: violation.wcag_criterion,
       violation_description: violation.description,
-      affected_html: element.repair_target_html ?? element.html,
+      affected_html: affectedHtml,
       css_selector: element.repair_target_selector ?? element.selector,
       context: [
         `Project type: ${project.project_type}.`,
@@ -438,6 +444,11 @@ function ProjectIssueCard({
   sourceHtml?: string;
   showProposalAction?: boolean;
 }) {
+  const firstAffectedElement = violation.affected_elements[0];
+  const missingLandmarkTarget =
+    violation.rule_id === "landmark-one-main" &&
+    !firstAffectedElement?.repair_target_html?.trim();
+
   return (
     <article className="project-issue-card">
       <header>
@@ -470,10 +481,19 @@ function ProjectIssueCard({
         </div>
       )}
       {entry?.error && <p className="project-error" role="alert">{entry.error}</p>}
+      {showProposalAction && missingLandmarkTarget && (
+        <p className="verification-support-message" role="status">
+          A safe repair target was not identified for this page landmark issue. The AI proposal was not requested.
+        </p>
+      )}
       {showProposalAction && (
         <button
           className="project-action-button"
-          disabled={entry?.pending !== undefined || violation.affected_elements.length === 0}
+          disabled={
+            entry?.pending !== undefined ||
+            violation.affected_elements.length === 0 ||
+            missingLandmarkTarget
+          }
           onClick={onPropose}
           type="button"
         >

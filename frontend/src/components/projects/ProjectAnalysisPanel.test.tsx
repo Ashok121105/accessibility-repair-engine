@@ -338,6 +338,63 @@ describe("developer project analysis", () => {
     });
   });
 
+  it("blocks landmark proposals when the scanner did not identify a safe target", async () => {
+    const user = userEvent.setup();
+    const projectWithoutLandmarkEvidence: ProjectAnalysisResponse = {
+      ...projectResult,
+      pages: [{
+        ...projectResult.pages[0],
+        violations: [{
+          ...projectResult.pages[0].violations[0],
+          rule_id: "landmark-one-main",
+          impact: "moderate",
+          wcag_criterion: "1.3.1 Info and Relationships",
+          description: "The page does not have a main landmark.",
+          affected_elements: [{
+            selector: "html",
+            html: "<html lang=\"en\">",
+            source_file: "index.html",
+            source_line: 1,
+            source_mapping_message: "Mapped to uploaded source.",
+          }],
+        }],
+      }],
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/project/analyze")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => projectWithoutLandmarkEvidence,
+        });
+      }
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    uploadResponse();
+
+    await user.upload(
+      screen.getByLabelText("Upload developer project ZIP"),
+      new File(["archive"], "landmark-demo.zip", { type: "application/zip" }),
+    );
+    await screen.findByText("completed");
+    await user.click(screen.getByRole("button", { name: "Violations" }));
+
+    const proposeButton = screen.getByRole("button", { name: "Propose Repair" });
+    expect(proposeButton).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "A safe repair target was not identified for this page landmark issue. The AI proposal was not requested.",
+    );
+
+    await user.click(proposeButton);
+
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/api/repair/propose"),
+      ),
+    ).toBe(false);
+    expect(screen.queryByText("AI proposal · not verified")).not.toBeInTheDocument();
+  });
+
   it("blocks verification, apply, and certificates for unsupported project rules", async () => {
     const user = userEvent.setup();
     const unsupportedProject: ProjectAnalysisResponse = {
