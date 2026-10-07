@@ -952,6 +952,112 @@ describe("dashboard", () => {
       rule_id: "image-alt",
       verification_id: "a3c64561-9180-4a81-9e37-4fa2e6093995",
       website: "https://example.com/",
+      affected_selector: "img.hero",
+    });
+  });
+
+  it("certifies the evidence-backed selector used for a landmark repair", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const defaultFetch = fetchMock.getMockImplementation();
+    const jsonResponse = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        headers: { "Content-Type": "application/json" },
+      });
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/api/scan")) {
+        return Promise.resolve(
+          jsonResponse({
+            url: "https://example.com",
+            final_url: "https://example.com/",
+            page_title: "Example site",
+            scanned_at: "2026-10-06T16:00:00Z",
+            total_violations: 1,
+            violations: [
+              {
+                id: "landmark-one-main",
+                rule_id: "landmark-one-main",
+                impact: "moderate",
+                severity: "moderate",
+                tags: ["best-practice"],
+                wcag_tags: [],
+                wcag_criterion: "WCAG mapping unavailable",
+                wcag_level: "WCAG mapping unavailable",
+                category: "Landmarks",
+                description: "Document must have one main landmark",
+                explanation: "A main landmark is needed.",
+                help: "Add one main landmark.",
+                affected_html_selectors: ["html"],
+                affected_html_elements: ["<html>"],
+                css_selectors: ["html"],
+                affected_node_count: 1,
+                affected_nodes: [
+                  {
+                    selectors: ["html"],
+                    html: "<html><body><article id='main-content'><h1>News</h1></article></body></html>",
+                    failure_summary: "No main landmark exists.",
+                    repair_target_html: '<article id="main-content"><h1>News</h1></article>',
+                    repair_target_selector: "#main-content",
+                    repair_context_html: '<body><article id="main-content"><h1>News</h1></article></body>',
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+      }
+      if (String(input).endsWith("/api/repair/verification-support")) {
+        return Promise.resolve(jsonResponse({ rule_ids: ["landmark-one-main"] }));
+      }
+      if (String(input).endsWith("/api/repair/propose")) {
+        return Promise.resolve(
+          jsonResponse({
+            repair_type: "add_main_landmark",
+            explanation: "Use the existing article as the main landmark.",
+            original_html: '<article id="main-content"><h1>News</h1></article>',
+            proposed_html: '<main id="main-content"><h1>News</h1></main>',
+            confidence: 0.9,
+            reasoning_summary: "The existing article content is retained.",
+          }),
+        );
+      }
+      if (String(input).endsWith("/api/repair/verify")) {
+        return Promise.resolve(
+          jsonResponse({
+            verification_id: "a3c64561-9180-4a81-9e37-4fa2e6093995",
+            status: "verified",
+            rule_id: "landmark-one-main",
+            original_violation_present: true,
+            repaired_violation_present: false,
+            new_violations: [],
+            scope_safe: true,
+            message: "All configured automated sandbox checks passed.",
+            checks: [{ name: "axe", passed: true, message: "Rule resolved." }],
+          }),
+        );
+      }
+      return defaultFetch!(input, init);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await openNewScan(user);
+    await user.type(screen.getByRole("textbox", { name: "Website URL or Website Name" }), "https://example.com");
+    await user.click(screen.getByRole("button", { name: /^scan website$/i }));
+    await screen.findByRole("heading", { name: "1 Issue Found" });
+    await openIssueDetails(user);
+    await user.click(screen.getByRole("button", { name: "Propose Repair" }));
+    await screen.findByText("AI PROPOSAL — NOT YET VERIFIED");
+    await user.click(screen.getByRole("button", { name: "Verify Repair" }));
+    await screen.findByText("✓ VERIFIED");
+    await user.click(screen.getByRole("button", { name: "Generate Certificate" }));
+    await screen.findByRole("heading", { name: "📜 Verified Accessibility Certificate" });
+
+    const certificateCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith("/api/certificates"));
+    expect(certificateCall).toBeDefined();
+    expect(JSON.parse(String(certificateCall?.[1]?.body))).toMatchObject({
+      rule_id: "landmark-one-main",
+      affected_selector: "#main-content",
+      affected_html: '<article id="main-content"><h1>News</h1></article>',
     });
   });
 

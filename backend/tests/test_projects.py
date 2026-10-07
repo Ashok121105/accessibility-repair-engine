@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.accessibility.models import AffectedNode, ScanResponse, Violation
 from backend.app.certificates import store as certificate_store
+from backend.app.dashboard.store import save_project_scan
 from backend.app.hindsight.service import get_hindsight_summary
 from backend.app.main import app
 from backend.app.projects import analyzer
@@ -476,6 +477,33 @@ def test_certificate_api_persists_project_metadata_and_retrieves_certificate() -
         repaired_html='<img alt="Company logo">',
         project_id="projcert",
         project_type="html",
+    )
+    save_project_scan(
+        ScanResponse(
+            url=request.website,
+            final_url=request.website,
+            page_title="Project certificate fixture",
+            scanned_at=request.scan_timestamp,
+            total_violations=1,
+            violations=[
+                Violation(
+                    id=request.rule_id,
+                    rule_id=request.rule_id,
+                    description=request.original_violation,
+                    wcag_criterion=request.wcag_criterion,
+                    wcag_level=request.wcag_level,
+                    help="Fix the recorded issue.",
+                    affected_nodes=[
+                        AffectedNode(
+                            selectors=[request.affected_selector],
+                            html=request.affected_html,
+                        )
+                    ],
+                )
+            ],
+        ),
+        request.project_id,
+        request.project_type,
     )
 
     created = client.post("/api/certificates", json=request.model_dump(mode="json"))

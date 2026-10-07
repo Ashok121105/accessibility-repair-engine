@@ -4,8 +4,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from backend.app.accessibility.models import AffectedNode, ScanResponse, Violation
 from backend.app.certificates.models import CertificateRequest
 from backend.app.certificates import service, store
+from backend.app.dashboard.store import save_project_scan, save_scan
 from backend.app.main import app
 from backend.app.repair.models import RepairProposal
 from backend.app.verification.models import (
@@ -71,6 +73,7 @@ def verification_run(request: CertificateRequest) -> VerificationRequest:
         selector=request.affected_selector,
         wcag_criterion=request.wcag_criterion,
         wcag_level=request.wcag_level,
+        website=request.website,
         repair_proposal=request.repair_proposal,
     )
 
@@ -82,39 +85,66 @@ def certificate_database(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
 
 def record_run(request: CertificateRequest) -> None:
     store.save_verification(verification_run(request), request.verification_result)
+    scan = ScanResponse(
+        url=request.website,
+        final_url=request.website,
+        page_title="Certificate fixture",
+        scanned_at=request.scan_timestamp,
+        total_violations=1,
+        violations=[
+            Violation(
+                id=request.rule_id,
+                rule_id=request.rule_id,
+                description=request.original_violation,
+                wcag_criterion=request.wcag_criterion,
+                wcag_level=request.wcag_level,
+                help="Fix the recorded issue.",
+                affected_nodes=[
+                    AffectedNode(
+                        selectors=[request.affected_selector],
+                        html=request.affected_html,
+                    )
+                ],
+            )
+        ],
+    )
+    if request.project_id is not None and request.project_type is not None:
+        save_project_scan(scan, request.project_id, request.project_type)
+    else:
+        save_scan(scan)
 
 
 @pytest.mark.parametrize(
-    ("verification_status", "expected"),
+    ("verification_status", "expected_status"),
     [
-        ("verified", "VERIFIED"),
-        ("rejected", "REJECTED"),
-        ("verification_failed", "VERIFICATION FAILED"),
+        ("verified", 200),
+        ("rejected", 409),
+        ("verification_failed", 409),
     ],
 )
 def test_certificate_generation_tracks_verification_outcome(
     verification_status: str,
-    expected: str,
+    expected_status: int,
 ) -> None:
     request = certificate_request(verification_status)
     record_run(request)
 
     response = client.post("/api/certificates", json=request.model_dump(mode="json"))
 
-    assert response.status_code == 200
+    assert response.status_code == expected_status
+    if expected_status != 200:
+        assert store.list_certificates() == []
+        return
     certificate = response.json()
-    assert certificate["verification_status"] == expected
+    assert certificate["verification_status"] == "VERIFIED"
     assert certificate["rule_id"] == "image-alt"
     assert certificate["wcag_criterion"] == "1.1.1 Non-text Content"
     assert certificate["evidence_hash"]
     assert "not a claim of universal WCAG conformance" in " ".join(
         certificate["limitations"]
     )
-    if expected == "VERIFIED":
-        assert "configured automated verification checks" in certificate["certificate_statement"]
-        assert "fully WCAG compliant" not in certificate["certificate_statement"]
-    else:
-        assert "does not claim that the repair passed" in certificate["certificate_statement"]
+    assert "configured automated verification checks" in certificate["certificate_statement"]
+    assert "fully WCAG compliant" not in certificate["certificate_statement"]
 
 
 def test_certificate_evidence_hash_is_deterministic() -> None:
@@ -182,6 +212,109 @@ def test_certificate_rejects_evidence_that_differs_from_verification(
     assert "does not match" in response.json()["detail"]
 
 
+def test_certificate_rejects_website_that_differs_from_verification() -> None:
+    request = certificate_request()
+    record_run(request)
+    altered = request.model_copy(update={"website": "https://other.example/"})
+
+    response = client.post(
+        "/api/certificates",
+        json=altered.model_dump(mode="json"),
+    )
+
+    assert response.status_code == 409
+    assert "does not match" in response.json()["detail"]
+
+
+def test_certificate_requires_matching_server_recorded_scan_metadata() -> None:
+    request = certificate_request()
+    record_run(request)
+    altered = request.model_copy(
+        update={"original_violation": "A different issue description"}
+    )
+
+    response = client.post(
+        "/api/certificates",
+        json=altered.model_dump(mode="json"),
+    )
+
+    assert response.status_code == 409
+    assert "source scan" in response.json()["detail"]
+
+
+def test_landmark_certificate_matches_scanner_selected_article_target() -> None:
+    timestamp = datetime(2026, 10, 6, 16, 0, tzinfo=timezone.utc)
+    original_html = '<article id="main-content"><h1>News</h1></article>'
+    repaired_html = '<main id="main-content"><h1>News</h1></main>'
+    proposal = RepairProposal(
+        repair_type="convert_container_to_main",
+        explanation="Convert the identified article to a main landmark.",
+        original_html=original_html,
+        proposed_html=repaired_html,
+        confidence=0.9,
+        reasoning_summary="The existing article content is retained.",
+    )
+    result = VerificationResult(
+        verification_id="a3c64561-9180-4a81-9e37-4fa2e6093995",
+        status="verified",
+        rule_id="landmark-one-main",
+        original_violation_present=True,
+        repaired_violation_present=False,
+        new_violations=[],
+        scope_safe=True,
+        message="The configured sandbox checks passed.",
+        checks=[VerificationCheck(name="axe", passed=True, message="Rule resolved.")],
+    )
+    request = CertificateRequest(
+        website="https://example.com/",
+        scan_timestamp=timestamp,
+        verification_id=result.verification_id,
+        rule_id="landmark-one-main",
+        wcag_criterion="WCAG mapping unavailable",
+        wcag_level="WCAG mapping unavailable",
+        original_violation="Document must have one main landmark",
+        repair_proposal=proposal,
+        verification_result=result,
+        affected_selector="#main-content",
+        affected_html=original_html,
+        repaired_html=repaired_html,
+    )
+    store.save_verification(verification_run(request), result)
+    save_scan(
+        ScanResponse(
+            url=request.website,
+            final_url=request.website,
+            page_title="News",
+            scanned_at=timestamp,
+            total_violations=1,
+            violations=[
+                Violation(
+                    id=request.rule_id,
+                    rule_id=request.rule_id,
+                    description=request.original_violation,
+                    wcag_criterion=request.wcag_criterion,
+                    wcag_level=request.wcag_level,
+                    help="Add a main landmark.",
+                    affected_nodes=[
+                        AffectedNode(
+                            selectors=["html"],
+                            html='<html><body><article id="main-content"><h1>News</h1></article></body></html>',
+                            repair_target_html=original_html,
+                            repair_target_selector="#main-content",
+                        )
+                    ],
+                )
+            ],
+        )
+    )
+
+    response = client.post("/api/certificates", json=request.model_dump(mode="json"))
+
+    assert response.status_code == 200
+    assert response.json()["evidence"]["affected_selector"] == "#main-content"
+    assert response.json()["evidence"]["affected_html"] == original_html
+
+
 def test_verified_certificate_rejects_failed_check() -> None:
     request = certificate_request(
         checks=[VerificationCheck(name="axe", passed=False, message="Failed")]
@@ -194,6 +327,29 @@ def test_verified_certificate_rejects_failed_check() -> None:
     )
 
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "result_updates",
+    [
+        {"scope_safe": False},
+        {"original_violation_present": False},
+        {"repaired_violation_present": True},
+        {"new_violations": ["button-name"]},
+    ],
+)
+def test_verified_certificate_rejects_incomplete_safety_evidence(
+    result_updates: dict[str, object],
+) -> None:
+    request = certificate_request()
+    result = request.verification_result.model_copy(update=result_updates)
+    request = request.model_copy(update={"verification_result": result})
+    record_run(request)
+
+    response = client.post("/api/certificates", json=request.model_dump(mode="json"))
+
+    assert response.status_code == 409
+    assert store.list_certificates() == []
 
 
 def test_invalid_certificate_input_is_rejected() -> None:

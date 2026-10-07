@@ -1107,7 +1107,12 @@ function ViolationCard({
   }
 
   async function handleGenerateCertificate() {
-    if (!proposal || !verification || verification.status !== "verified") return;
+    if (
+      !proposal ||
+      !verificationRequest ||
+      !verification ||
+      verification.status !== "verified"
+    ) return;
     const request: CertificateRequest = {
       website: pageUrl,
       scan_timestamp: scanTimestamp || new Date().toISOString(),
@@ -1118,10 +1123,7 @@ function ViolationCard({
       original_violation: violation.description,
       repair_proposal: proposal,
       verification_result: verification,
-      affected_selector:
-        violation.css_selectors[0] ??
-        violation.affected_html_selectors[0] ??
-        "",
+      affected_selector: verificationRequest.selector,
       affected_html: proposal.original_html,
       repaired_html: proposal.proposed_html,
     };
