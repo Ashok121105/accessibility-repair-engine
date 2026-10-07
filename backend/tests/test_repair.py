@@ -254,3 +254,104 @@ def test_proposal_endpoint_surfaces_missing_api_key(monkeypatch: pytest.MonkeyPa
 
     assert response.status_code == 503
     assert "GEMINI_API_KEY" in response.json()["detail"]
+
+
+def landmark_request() -> RepairProposalRequest:
+    target = (
+        '<div id="main-content"><h1>Welcome</h1>'
+        "<p>This is meaningful existing page content for visitors.</p></div>"
+    )
+    return RepairProposalRequest(
+        violation_rule_id="landmark-one-main",
+        wcag_criterion="1.3.1 Info and Relationships",
+        violation_description="The page does not have a main landmark.",
+        affected_html=target,
+        css_selector="#main-content",
+        context_html=f"<header><h2>Site name</h2></header>{target}<footer>Footer</footer>",
+        page_url="https://example.com",
+    )
+
+
+@pytest.mark.anyio
+async def test_landmark_proposal_wraps_only_evidenced_existing_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_data = landmark_request()
+    target = request_data.affected_html
+    posted = mock_gemini(
+        monkeypatch,
+        gemini_text_response(
+            json.dumps(
+                {
+                    "repair_type": "landmark_addition",
+                    "explanation": "Wrap the existing content container in main.",
+                    "original_html": target,
+                    "proposed_html": f"<main>{target}</main>",
+                    "confidence": 0.9,
+                    "reasoning_summary": "Only the selected existing container is wrapped.",
+                }
+            )
+        ),
+    )
+
+    proposal = await service.propose_repair(request_data, "test-secret")
+
+    prompt = posted[0]["json"]["contents"][0]["parts"][0]["text"]
+    assert '"context_html"' in prompt
+    assert "<header>" in prompt
+    assert proposal.repair_type == "landmark_addition"
+    assert proposal.proposed_html == f"<main>{target}</main>"
+
+
+@pytest.mark.anyio
+async def test_ambiguous_landmark_proposal_fails_closed_without_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_data = landmark_request().model_copy(
+        update={
+            "context_html": (
+                f'{landmark_request().affected_html}'
+                '<section class="content"><h2>Other</h2>'
+                "Another meaningful section with existing content.</section>"
+            )
+        }
+    )
+
+    async def unexpected_client(**kwargs: object) -> None:
+        raise AssertionError(f"Ambiguous evidence must not call Gemini: {kwargs}")
+
+    monkeypatch.setattr(service.httpx, "AsyncClient", unexpected_client)
+
+    proposal = await service.propose_repair(request_data, "test-secret")
+
+    assert proposal.repair_type == "repair_not_safe"
+    assert proposal.proposed_html == ""
+    assert "no content or insertion location was invented" in proposal.reasoning_summary
+
+
+@pytest.mark.anyio
+async def test_landmark_proposal_rejects_invented_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_data = landmark_request()
+    target = request_data.affected_html
+    mock_gemini(
+        monkeypatch,
+        gemini_text_response(
+            json.dumps(
+                {
+                    "repair_type": "landmark_addition",
+                    "explanation": "Add a main landmark.",
+                    "original_html": target,
+                    "proposed_html": f"<main>{target}<p>Content</p></main>",
+                    "confidence": 0.9,
+                    "reasoning_summary": "Adds placeholder text.",
+                }
+            )
+        ),
+    )
+
+    proposal = await service.propose_repair(request_data, "test-secret")
+
+    assert proposal.repair_type == "repair_not_safe"
+    assert proposal.proposed_html == ""

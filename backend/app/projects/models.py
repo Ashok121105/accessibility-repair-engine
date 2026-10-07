@@ -22,6 +22,9 @@ class ProjectAffectedElement(BaseModel):
     source_file: str | None = None
     source_line: int | None = None
     source_mapping_message: str
+    repair_target_html: str | None = None
+    repair_target_selector: str | None = None
+    repair_context_html: str | None = None
 
 
 class ProjectViolation(BaseModel):

@@ -664,6 +664,97 @@ describe("dashboard", () => {
     });
   });
 
+  it("verifies landmark-one-main with the scanner-selected page target and context", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const originalImplementation = fetchMock.getMockImplementation()!;
+    const targetHtml =
+      '<div id="main-content"><h1>Welcome</h1><p>This is meaningful existing page content for visitors.</p></div>';
+    const contextHtml =
+      `<header><h2>Example site</h2></header>${targetHtml}<footer>Contact information</footer>`;
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/scan")) {
+        const response = await originalImplementation(input, init);
+        const payload = await response.json();
+        payload.violations[0] = {
+          ...payload.violations[0],
+          id: "landmark-one-main",
+          rule_id: "landmark-one-main",
+          description: "The page does not have a main landmark.",
+          affected_nodes: [{
+            selectors: ["html"],
+            html: "<html>",
+            repair_target_html: targetHtml,
+            repair_target_selector: "#main-content",
+            repair_context_html: contextHtml,
+          }],
+        };
+        return new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/repair/verification-support")) {
+        const response = await originalImplementation(input, init);
+        const payload = await response.json();
+        payload.rule_ids.push("landmark-one-main");
+        return new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/repair/propose")) {
+        return new Response(JSON.stringify({
+          repair_type: "landmark_addition",
+          explanation: "Wrap the existing main content container.",
+          original_html: targetHtml,
+          proposed_html: `<main>${targetHtml}</main>`,
+          confidence: 0.9,
+          reasoning_summary: "Only the existing content container is wrapped.",
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.endsWith("/api/repair/verify")) {
+        return new Response(JSON.stringify({
+          verification_id: "landmark-verification-id",
+          status: "verified",
+          rule_id: "landmark-one-main",
+          original_violation_present: true,
+          repaired_violation_present: false,
+          new_violations: [],
+          scope_safe: true,
+          message: "All configured automated sandbox checks passed.",
+          checks: [{ name: "repair_resolves_violation", passed: true, message: "Resolved." }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return originalImplementation(input, init);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await openNewScan(user);
+    await user.type(screen.getByRole("textbox", { name: "Website URL or Website Name" }), "https://example.com");
+    await user.click(screen.getByRole("button", { name: /^scan website$/i }));
+    await screen.findByRole("heading", { name: "1 Issue Found" });
+    await openIssueDetails(user);
+    await user.click(screen.getByRole("button", { name: "Propose Repair" }));
+    await screen.findByText("AI PROPOSAL — NOT YET VERIFIED");
+    expect(screen.getByRole("button", { name: "Verify Repair" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Verify Repair" }));
+
+    expect(await screen.findByText("✓ VERIFIED")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply Verified Repair" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Generate Certificate" })).toBeEnabled();
+    const verifyCall = fetchMock.mock.calls.find(([input]) => (
+      String(input).endsWith("/api/repair/verify")
+    ));
+    expect(verifyCall).toBeDefined();
+    expect(JSON.parse(String(verifyCall?.[1]?.body))).toMatchObject({
+      rule_id: "landmark-one-main",
+      selector: "#main-content",
+      context_html: contextHtml,
+    });
+  });
+
   it("disables verification and explains unsupported rules without sending a request", async () => {
     const fetchMock = vi.mocked(fetch);
     const originalImplementation = fetchMock.getMockImplementation()!;

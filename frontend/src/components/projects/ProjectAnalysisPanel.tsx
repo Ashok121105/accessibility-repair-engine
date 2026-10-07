@@ -117,14 +117,15 @@ export default function ProjectAnalysisPanel({
       violation_rule_id: violation.rule_id,
       wcag_criterion: violation.wcag_criterion,
       violation_description: violation.description,
-      affected_html: element.html,
-      css_selector: element.selector,
+      affected_html: element.repair_target_html ?? element.html,
+      css_selector: element.repair_target_selector ?? element.selector,
       context: [
         `Project type: ${project.project_type}.`,
         `Source file: ${element.source_file ?? "unavailable"}.`,
         `Source line: ${element.source_line ?? "unavailable"}.`,
         `Rendered selector: ${element.selector || "unavailable"}.`,
       ].join("\n"),
+      context_html: element.repair_context_html ?? "",
       page_url: project.project_url,
     };
     updateRepair(key, { pending: "proposal", error: undefined });
@@ -160,7 +161,7 @@ export default function ProjectAnalysisPanel({
       selector: request.css_selector,
       wcag_criterion: violation.wcag_criterion,
       wcag_level: violation.wcag_level,
-      context_html: "",
+      context_html: request.context_html ?? "",
       website: project.project_url,
       repair_proposal: proposal,
     };

@@ -995,15 +995,18 @@ function ViolationCard({
       wcag_criterion: violation.wcag_criterion ?? "WCAG mapping unavailable",
       violation_description: violation.description,
       affected_html:
+        affectedNode?.repair_target_html ??
         affectedNode?.html ??
         violation.affected_html_elements[0] ??
         "",
       css_selector:
+        affectedNode?.repair_target_selector ??
         affectedNode?.selectors[0] ??
         violation.css_selectors[0] ??
         violation.affected_html_selectors[0] ??
         "",
       context: affectedNode?.failure_summary ?? "",
+      context_html: affectedNode?.repair_context_html ?? "",
       page_url: pageUrl,
     };
 
@@ -1038,17 +1041,19 @@ function ViolationCard({
       proposal.repair_type === "repair_not_safe" ||
       !verificationSupported
     ) return;
+    const affectedNode = violation.affected_nodes[0];
     const verificationRequest: VerificationRequest = {
       original_html: proposal.original_html,
       proposed_html: proposal.proposed_html,
       rule_id: ruleId,
       selector:
+        affectedNode?.repair_target_selector ??
         violation.css_selectors[0] ??
         violation.affected_html_selectors[0] ??
         "",
       wcag_criterion: violation.wcag_criterion ?? "WCAG mapping unavailable",
       wcag_level: violation.wcag_level ?? "WCAG mapping unavailable",
-      context_html: "",
+      context_html: affectedNode?.repair_context_html ?? "",
       website: pageUrl,
       repair_proposal: proposal,
     };

@@ -193,7 +193,7 @@ async def test_unknown_rule_fails_closed(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("rule_id", ["landmark-one-main", "heading-order"])
+@pytest.mark.parametrize("rule_id", ["heading-order"])
 async def test_unsupported_landmark_and_heading_rules_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
     rule_id: str,
@@ -213,6 +213,85 @@ async def test_unsupported_landmark_and_heading_rules_fail_closed(
     assert result.scope_safe is False
     assert result.checks[0].name == "supported_rule"
     assert result.checks[0].passed is False
+
+
+@pytest.mark.anyio
+async def test_landmark_one_main_is_verified_only_for_exact_existing_target() -> None:
+    original_html = (
+        '<div id="main-content"><h1>Welcome</h1>'
+        "<p>This is meaningful existing page content for visitors.</p></div>"
+    )
+    proposed_html = f"<main>{original_html}</main>"
+    context_html = (
+        "<header><h2>Example site</h2></header>"
+        f"{original_html}"
+        "<footer>Contact information</footer>"
+    )
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="landmark-one-main",
+        selector="#main-content",
+        wcag_criterion="1.3.1 Info and Relationships",
+        context_html=context_html,
+        repair_proposal=RepairProposal(
+            repair_type="landmark_addition",
+            explanation="Wrap the identified existing content container.",
+            original_html=original_html,
+            proposed_html=proposed_html,
+            confidence=0.9,
+            reasoning_summary="Only the existing content container is wrapped.",
+        ),
+    )
+
+    result = await sandbox.verify_repair(request)
+
+    assert result.status == "verified", result.model_dump()
+    assert result.rule_id == "landmark-one-main"
+    assert result.original_violation_present is True
+    assert result.repaired_violation_present is False
+    assert result.new_violations == []
+    assert result.scope_safe is True
+    assert all(check.passed for check in result.checks)
+
+
+@pytest.mark.anyio
+async def test_landmark_one_main_rejects_ambiguous_context_before_scanning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_html = (
+        '<div id="main-content"><h1>Welcome</h1>'
+        "<p>This is meaningful existing page content for visitors.</p></div>"
+    )
+    proposed_html = f"<main>{original_html}</main>"
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="landmark-one-main",
+        selector="#main-content",
+        context_html=(
+            f"{original_html}"
+            '<section class="content"><h2>Other</h2>'
+            "Another meaningful section with existing content.</section>"
+        ),
+        repair_proposal=RepairProposal(
+            repair_type="landmark_addition",
+            explanation="Wrap the identified existing content container.",
+            original_html=original_html,
+            proposed_html=proposed_html,
+            confidence=0.9,
+            reasoning_summary="Only the existing content container is wrapped.",
+        ),
+    )
+
+    result = await sandbox.verify_repair(request)
+
+    assert result.status == "rejected"
+    assert result.scope_safe is False
+    assert any(
+        check.name == "selector_and_context" and not check.passed
+        for check in result.checks
+    )
 
 
 @pytest.mark.anyio
@@ -341,6 +420,7 @@ def test_verification_support_api_returns_verifier_rule_ids() -> None:
             "image-alt",
             "input-image-alt",
             "label",
+            "landmark-one-main",
             "link-name",
             "region",
         ]

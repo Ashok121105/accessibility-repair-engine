@@ -2,13 +2,17 @@ import asyncio
 
 import pytest
 from fastapi.testclient import TestClient
+from playwright.async_api import async_playwright
 
 from backend.app.accessibility.models import ScanResponse
 from backend.app.accessibility.scanner import (
     ScanTimedOut,
     ScannerFailure,
     ScanError,
+    LANDMARK_CANDIDATE_SCRIPT,
     WebsiteUnreachable,
+    _landmark_target,
+    enrich_landmark_repair_evidence,
     _run_axe,
     parse_axe_results,
 )
@@ -217,3 +221,169 @@ def test_parse_axe_results_extracts_tags_nodes_and_selectors() -> None:
         "#submit",
     ]
     assert violation.affected_nodes[0].html == '<button class="icon-only"></button>'
+
+
+@pytest.mark.anyio
+async def test_landmark_scan_enriches_html_node_with_unique_page_target() -> None:
+    scan = parse_axe_results(
+        url="https://example.com",
+        final_url="https://example.com/",
+        page_title="Example",
+        result={
+            "violations": [
+                {
+                    "id": "landmark-one-main",
+                    "impact": "moderate",
+                    "tags": ["wcag2a"],
+                    "description": "Page must have one main landmark.",
+                    "help": "Add a main landmark.",
+                    "nodes": [
+                        {
+                            "target": ["html"],
+                            "html": "<html>",
+                            "failureSummary": "Page must have one main landmark.",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    target_html = (
+        '<div id="main-content"><h1>Welcome</h1>'
+        "<p>This is meaningful existing page content for visitors.</p></div>"
+    )
+    context_html = (
+        '<header><h2>Site name</h2></header>'
+        f"{target_html}"
+        "<footer>Footer</footer>"
+    )
+
+    class EvidencePage:
+        async def evaluate(self, script: str) -> dict[str, object]:
+            assert "document.body" in script
+            return {
+                "contextHtml": context_html,
+                "mainCount": 0,
+                "candidates": [
+                    {
+                        "tag": "div",
+                        "selector": "#main-content",
+                        "html": target_html,
+                        "identityMatches": 1,
+                        "unchanged": True,
+                        "hasHeading": True,
+                        "textLength": 64,
+                    }
+                ],
+            }
+
+    enriched = await enrich_landmark_repair_evidence(EvidencePage(), scan)  # type: ignore[arg-type]
+    node = enriched.violations[0].affected_nodes[0]
+
+    assert node.html == "<html>"
+    assert node.repair_target_html == target_html
+    assert node.repair_target_selector == "#main-content"
+    assert node.repair_context_html == context_html
+
+
+@pytest.mark.anyio
+async def test_landmark_scan_does_not_select_ambiguous_page_targets() -> None:
+    scan = parse_axe_results(
+        url="https://example.com",
+        final_url="https://example.com/",
+        page_title="Example",
+        result={
+            "violations": [
+                {
+                    "id": "landmark-one-main",
+                    "impact": "moderate",
+                    "tags": ["wcag2a"],
+                    "description": "Page must have one main landmark.",
+                    "help": "Add a main landmark.",
+                    "nodes": [
+                        {
+                            "target": ["html"],
+                            "html": "<html>",
+                            "failureSummary": "Page must have one main landmark.",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    class AmbiguousEvidencePage:
+        async def evaluate(self, script: str) -> dict[str, object]:
+            assert "document.body" in script
+            return {
+                "contextHtml": (
+                    '<div id="main-content"><h1>Welcome</h1>'
+                    "<p>Existing content with enough meaningful text.</p></div>"
+                    '<section class="content"><h2>Other</h2>'
+                    "More existing meaningful content here.</section>"
+                ),
+                "mainCount": 0,
+                "candidates": [
+                    {
+                        "tag": "div",
+                        "selector": "#main-content",
+                        "html": '<div id="main-content"><h1>Welcome</h1><p>Existing content with enough meaningful text.</p></div>',
+                        "identityMatches": 1,
+                        "unchanged": True,
+                        "hasHeading": True,
+                        "textLength": 50,
+                    },
+                    {
+                        "tag": "section",
+                        "selector": "section.content",
+                        "html": (
+                            '<section class="content"><h2>Other</h2>'
+                            "More existing meaningful content here.</section>"
+                        ),
+                        "identityMatches": 1,
+                        "unchanged": True,
+                        "hasHeading": True,
+                        "textLength": 40,
+                    },
+                ],
+            }
+
+    enriched = await enrich_landmark_repair_evidence(
+        AmbiguousEvidencePage(),  # type: ignore[arg-type]
+        scan,
+    )
+
+    assert enriched.violations[0].affected_nodes[0].repair_target_html is None
+    assert enriched.violations[0].affected_nodes[0].repair_context_html is None
+
+
+@pytest.mark.anyio
+async def test_landmark_page_evidence_is_sanitized_without_changing_target_content() -> None:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                "<header><h2>Example site</h2></header>"
+                '<div id="main-content" onclick="doNotRun()"><h1>Welcome</h1>'
+                "<p>This is meaningful existing page content for visitors.</p></div>"
+            )
+            unsafe_evidence = await page.evaluate(LANDMARK_CANDIDATE_SCRIPT)
+            unsafe_candidate = unsafe_evidence["candidates"][0]
+            assert unsafe_candidate["unchanged"] is False
+            assert _landmark_target(unsafe_evidence) is None
+
+            await page.set_content(
+                "<header><h2>Example site</h2></header>"
+                '<div id="main-content"><h1>Welcome</h1>'
+                "<p>This is meaningful existing page content for visitors.</p></div>"
+            )
+            safe_evidence = await page.evaluate(LANDMARK_CANDIDATE_SCRIPT)
+            target = _landmark_target(safe_evidence)
+
+            assert target is not None
+            assert target[0].startswith('<div id="main-content">')
+            assert "<header>" in target[2]
+            assert "script" not in target[2]
+        finally:
+            await browser.close()

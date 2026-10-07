@@ -12,6 +12,7 @@ class RepairProposalRequest(BaseModel):
     affected_html: str = Field(default="", max_length=20_000)
     css_selector: str = Field(default="", max_length=2000)
     context: str = Field(default="", max_length=10_000)
+    context_html: str = Field(default="", max_length=20_000)
     page_url: str = Field(min_length=1, max_length=2048)
 
     @field_validator("page_url")

@@ -17,6 +17,7 @@ from backend.app.repair.application_models import (
 )
 from backend.app.verification.sandbox import (
     SUPPORTED_RULE_ATTRIBUTES,
+    SUPPORTED_STRUCTURAL_RULES,
     VERIFICATION_TIMEOUT_SECONDS,
     _FragmentParser,
     _install_sandbox_document,
@@ -118,6 +119,9 @@ def _snapshot(result: object) -> ScanSnapshot:
 
 
 async def _scan_isolated_pair(request: RepairApplicationRequest) -> tuple[ScanSnapshot, ScanSnapshot]:
+    if request.rule_id == "landmark-one-main":
+        return await _scan_landmark_isolated_pair(request)
+
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         try:
@@ -163,6 +167,116 @@ async def _scan_isolated_pair(request: RepairApplicationRequest) -> tuple[ScanSn
                 )
             after_result = await asyncio.wait_for(
                 Axe().run(page, context="#repair-sandbox"),
+                timeout=VERIFICATION_TIMEOUT_SECONDS,
+            )
+            after = _snapshot(after_result)
+            await context.close()
+            return before, after
+        finally:
+            await browser.close()
+
+
+async def _scan_landmark_isolated_pair(
+    request: RepairApplicationRequest,
+) -> tuple[ScanSnapshot, ScanSnapshot]:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(service_workers="block")
+
+            async def block_network(route: Any) -> None:
+                await route.abort()
+
+            await context.route("**/*", block_network)
+            page = await context.new_page()
+            await page.set_content(
+                "<!doctype html><html lang='en'><head><title>Repair application sandbox</title>"
+                "</head><body><div id='repair-sandbox'></div></body></html>",
+                wait_until="domcontentloaded",
+            )
+            target_state = await page.evaluate(
+                """({contextHtml, originalHtml, selector}) => {
+                  const root = document.querySelector("#repair-sandbox");
+                  const template = document.createElement("template");
+                  template.innerHTML = contextHtml;
+                  root.replaceChildren(template.content);
+                  let targets;
+                  try {
+                    targets = root.querySelectorAll(selector);
+                  } catch {
+                    return { safe: false };
+                  }
+                  return {
+                    safe: targets.length === 1 &&
+                      targets[0].outerHTML === originalHtml &&
+                      root.querySelectorAll("main").length === 0,
+                    contextHtml: root.innerHTML,
+                  };
+                }""",
+                {
+                    "contextHtml": request.context_html,
+                    "originalHtml": request.original_html,
+                    "selector": request.selector,
+                },
+            )
+            if not target_state["safe"]:
+                raise RepairApplicationRejected(
+                    "The verified content target is not unique in the isolated page context"
+                )
+            original_context_html = target_state["contextHtml"]
+            before_result = await asyncio.wait_for(
+                Axe().run(page),
+                timeout=VERIFICATION_TIMEOUT_SECONDS,
+            )
+            before = _snapshot(before_result)
+            repair_state = await page.evaluate(
+                """({proposedHtml, selector, originalContextHtml}) => {
+                  const root = document.querySelector("#repair-sandbox");
+                  let targets;
+                  try {
+                    targets = root.querySelectorAll(selector);
+                  } catch {
+                    return { safe: false };
+                  }
+                  if (targets.length !== 1) return { safe: false };
+                  const template = document.createElement("template");
+                  template.innerHTML = proposedHtml;
+                  targets[0].replaceWith(template.content);
+                  const repairedTargets = root.querySelectorAll(selector);
+                  const main = repairedTargets[0]?.closest("main");
+                  const normalized = root.cloneNode(true);
+                  const normalizedTarget = normalized.querySelector(selector);
+                  const normalizedMain = normalizedTarget?.closest("main");
+                  if (
+                    !normalizedMain ||
+                    normalizedMain.children.length !== 1 ||
+                    normalizedMain.firstElementChild !== normalizedTarget
+                  ) return { safe: false };
+                  normalizedMain.replaceWith(
+                    normalizedMain.firstElementChild.cloneNode(true)
+                  );
+                  return {
+                    safe: repairedTargets.length === 1 &&
+                      main !== null &&
+                      main.children.length === 1 &&
+                      main.firstElementChild === repairedTargets[0] &&
+                      main.outerHTML === proposedHtml &&
+                      root.querySelectorAll("main").length === 1 &&
+                      normalized.innerHTML === originalContextHtml,
+                  };
+                }""",
+                {
+                    "proposedHtml": request.proposed_html,
+                    "selector": request.selector,
+                    "originalContextHtml": original_context_html,
+                },
+            )
+            if not repair_state["safe"]:
+                raise RepairApplicationRejected(
+                    "The verified main wrapper changed the existing page context"
+                )
+            after_result = await asyncio.wait_for(
+                Axe().run(page),
                 timeout=VERIFICATION_TIMEOUT_SECONDS,
             )
             after = _snapshot(after_result)
@@ -285,7 +399,10 @@ def _validate_against_recorded_verification(
         raise RepairApplicationRejected(
             "Submitted repair evidence differs from the server-recorded verified proposal"
         )
-    if request.rule_id not in SUPPORTED_RULE_ATTRIBUTES:
+    if (
+        request.rule_id not in SUPPORTED_RULE_ATTRIBUTES
+        and request.rule_id not in SUPPORTED_STRUCTURAL_RULES
+    ):
         raise RepairApplicationRejected(
             "The verification engine does not support applying this rule"
         )

@@ -15,7 +15,10 @@ from axe_core_python.async_playwright import Axe
 from playwright.async_api import Route, async_playwright
 
 from backend.app.accessibility.models import ScanResponse
-from backend.app.accessibility.scanner import parse_axe_results
+from backend.app.accessibility.scanner import (
+    enrich_landmark_repair_evidence,
+    parse_axe_results,
+)
 from backend.app.projects.models import (
     ProjectAffectedElement,
     ProjectAnalysisResponse,
@@ -377,12 +380,13 @@ async def _scan_static_page(path: Path, project_url: str) -> ScanResponse:
                     Axe().run(page),
                     timeout=SCAN_TIMEOUT_SECONDS,
                 )
-                return parse_axe_results(
+                scan = parse_axe_results(
                     url=project_url,
                     final_url=project_url,
                     page_title=await page.title(),
                     result=result,
                 )
+                return await enrich_landmark_repair_evidence(page, scan)
             finally:
                 await browser.close()
     except Exception as error:
@@ -414,6 +418,9 @@ def _project_page(
                             if line is not None
                             else "Source mapping unavailable for this rendered violation."
                         ),
+                        repair_target_html=node.repair_target_html,
+                        repair_target_selector=node.repair_target_selector,
+                        repair_context_html=node.repair_context_html,
                     )
                 )
         violations.append(

@@ -22,7 +22,7 @@ SUPPORTED_RULE_ATTRIBUTES: dict[str, frozenset[str]] = {
     "link-name": frozenset({"aria-label", "aria-labelledby"}),
     "label": frozenset({"aria-label", "aria-labelledby"}),
 }
-SUPPORTED_STRUCTURAL_RULES = frozenset({"region"})
+SUPPORTED_STRUCTURAL_RULES = frozenset({"region", "landmark-one-main"})
 VOID_ELEMENTS = frozenset(
     {
         "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -256,6 +256,9 @@ async def _install_sandbox_document(
 async def _run_pair(
     request: VerificationRequest,
 ) -> tuple[Counter[tuple[str, str]], Counter[tuple[str, str]], bool]:
+    if request.rule_id == "landmark-one-main":
+        return await _run_landmark_pair(request)
+
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         try:
@@ -317,6 +320,132 @@ async def _run_pair(
             repaired_findings = _axe_violations(repaired_result)
             await context.close()
             return original_findings, repaired_findings, target_retained and context_unchanged
+        finally:
+            await browser.close()
+
+
+async def _run_landmark_pair(
+    request: VerificationRequest,
+) -> tuple[Counter[tuple[str, str]], Counter[tuple[str, str]], bool]:
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(service_workers="block")
+
+            async def block_network(route: object) -> None:
+                await route.abort()  # type: ignore[attr-defined]
+
+            await context.route("**/*", block_network)
+            page = await context.new_page()
+            await page.set_content(
+                "<!doctype html><html lang='en'><head><title>Repair verification sandbox</title>"
+                "</head><body><div id='repair-sandbox'></div></body></html>",
+                wait_until="domcontentloaded",
+            )
+            initial_state = await page.evaluate(
+                """({contextHtml, originalHtml, selector}) => {
+                  const root = document.querySelector("#repair-sandbox");
+                  const template = document.createElement("template");
+                  template.innerHTML = contextHtml;
+                  root.replaceChildren(template.content);
+                  let target;
+                  try {
+                    const matches = root.querySelectorAll(selector);
+                    if (matches.length !== 1) return { safe: false };
+                    target = matches[0];
+                  } catch {
+                    return { safe: false };
+                  }
+                  const signal = /^(main|content|contentarea|maincontent|primarycontent|pagecontent|sitecontent)$/i;
+                  const identities = [
+                    ...(target.id ? [target.id] : []),
+                    ...target.classList,
+                  ].filter((value) => signal.test(value.replace(/[-_]/g, "")));
+                  const candidates = [...root.querySelectorAll("div,section,article")].filter((element) => {
+                    const tokens = [
+                      ...(element.id ? [element.id] : []),
+                      ...element.classList,
+                    ].filter((value) => signal.test(value.replace(/[-_]/g, "")));
+                    const textLength = (element.textContent || "").trim().replace(/\\s+/g, " ").length;
+                    return tokens.length === 1 &&
+                      element.querySelector("h1,h2,h3,h4,h5,h6") &&
+                      textLength >= 30;
+                  });
+                  return {
+                    safe: ["div", "section", "article"].includes(target.tagName.toLowerCase()) &&
+                      identities.length === 1 &&
+                      target.querySelector("h1,h2,h3,h4,h5,h6") !== null &&
+                      (target.textContent || "").trim().replace(/\\s+/g, " ").length >= 30 &&
+                      target.outerHTML === originalHtml &&
+                      candidates.length === 1 &&
+                      candidates[0] === target &&
+                      root.querySelectorAll("main").length === 0,
+                    contextHtml: root.innerHTML,
+                  };
+                }""",
+                {
+                    "contextHtml": request.context_html,
+                    "originalHtml": request.original_html,
+                    "selector": request.selector,
+                },
+            )
+            if not initial_state["safe"]:
+                raise SandboxScopeError(
+                    "The supplied context does not contain exactly one clearly identified existing content target"
+                )
+            original_context_html = initial_state["contextHtml"]
+            original_findings = _axe_violations(
+                await asyncio.wait_for(
+                    _run_sandbox_axe(page),
+                    timeout=VERIFICATION_TIMEOUT_SECONDS,
+                )
+            )
+            scope_state = await page.evaluate(
+                """({proposedHtml, selector, originalContextHtml}) => {
+                  const root = document.querySelector("#repair-sandbox");
+                  const matches = root.querySelectorAll(selector);
+                  if (matches.length !== 1) return { safe: false };
+                  const target = matches[0];
+                  const template = document.createElement("template");
+                  template.innerHTML = proposedHtml;
+                  target.replaceWith(template.content);
+                  const repairedTarget = root.querySelector(selector);
+                  const main = repairedTarget?.closest("main");
+                  const normalized = root.cloneNode(true);
+                  const normalizedTarget = normalized.querySelector(selector);
+                  const normalizedMain = normalizedTarget?.closest("main");
+                  if (!normalizedMain || normalizedMain.children.length !== 1) {
+                    return { safe: false };
+                  }
+                  normalizedMain.replaceWith(normalizedMain.firstElementChild.cloneNode(true));
+                  return {
+                    safe: root.querySelectorAll(selector).length === 1 &&
+                      main !== null &&
+                      main.children.length === 1 &&
+                      main.firstElementChild === repairedTarget &&
+                      main.outerHTML === proposedHtml &&
+                      root.querySelectorAll("main").length === 1 &&
+                      normalized.innerHTML === originalContextHtml,
+                  };
+                }""",
+                {
+                    "proposedHtml": request.proposed_html,
+                    "selector": request.selector,
+                    "originalContextHtml": original_context_html,
+                },
+            )
+            if not scope_state["safe"]:
+                raise SandboxScopeError(
+                    "The existing target or surrounding page context changed unexpectedly"
+                )
+            repaired_findings = _axe_violations(
+                await asyncio.wait_for(
+                    _run_sandbox_axe(page),
+                    timeout=VERIFICATION_TIMEOUT_SECONDS,
+                )
+            )
+            await context.close()
+            return original_findings, repaired_findings, True
         finally:
             await browser.close()
 

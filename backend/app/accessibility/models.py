@@ -42,6 +42,9 @@ class AffectedNode(BaseModel):
     selectors: list[str] = Field(default_factory=list)
     html: str = ""
     failure_summary: str | None = None
+    repair_target_html: str | None = None
+    repair_target_selector: str | None = None
+    repair_context_html: str | None = None
 
 
 class Violation(BaseModel):

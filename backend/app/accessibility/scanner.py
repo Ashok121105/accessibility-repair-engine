@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import logging
+import re
 import socket
 from urllib.parse import urlsplit
 
@@ -23,6 +24,64 @@ NETWORK_ERROR_MARKERS = (
     "ERR_INTERNET_DISCONNECTED",
     "ERR_ADDRESS_UNREACHABLE",
 )
+LANDMARK_CONTEXT_MAX_LENGTH = 20_000
+LANDMARK_CANDIDATE_SCRIPT = """() => {
+  const body = document.body;
+  if (!body) return { contextHtml: "", candidates: [] };
+  const sanitize = (root) => {
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll(
+      "script,style,template,noscript,iframe,frame,frameset,object,embed,applet,base,link,meta,input,textarea,select"
+    ).forEach((node) => node.remove());
+    const allowed = new Set([
+      "id", "class", "role", "lang", "title", "alt", "scope",
+      "aria-label", "aria-labelledby", "aria-describedby", "aria-hidden"
+    ]);
+    [clone, ...clone.querySelectorAll("*")].forEach((element) => {
+      for (const attribute of [...element.attributes]) {
+        if (!allowed.has(attribute.name.toLowerCase())) {
+          element.removeAttribute(attribute.name);
+        }
+      }
+    });
+    return clone;
+  };
+  const cleanBody = sanitize(body);
+  const signalPattern = /^(main|content|contentarea|maincontent|primarycontent|pagecontent|sitecontent)$/i;
+  const candidates = [...body.querySelectorAll("div,section,article")].map((element) => {
+    const identity = [
+      ...(element.id ? [element.id] : []),
+      ...[...element.classList],
+    ];
+    const hasHeading = Boolean(element.querySelector("h1,h2,h3,h4,h5,h6"));
+    const textLength = (element.innerText || element.textContent || "").trim().replace(/\\s+/g, " ").length;
+    const cleanTarget = sanitize(element);
+    const idSelector = /^[A-Za-z][A-Za-z0-9_-]*$/.test(element.id) ? `#${element.id}` : "";
+    const classSelector = [...element.classList]
+      .filter((name) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(name) && signalPattern.test(name.replace(/[-_]/g, "")))
+      .map((name) => `${element.tagName.toLowerCase()}.${name}`)
+      .find((selector) => document.querySelectorAll(selector).length === 1) || "";
+    const selector = idSelector && document.querySelectorAll(idSelector).length === 1
+      ? idSelector
+      : classSelector;
+    return {
+      tag: element.tagName.toLowerCase(),
+      id: element.id,
+      classes: [...element.classList],
+      selector,
+      html: cleanTarget.outerHTML,
+      unchanged: cleanTarget.outerHTML === element.outerHTML,
+      hasHeading,
+      textLength,
+      identityMatches: identity.filter((token) => signalPattern.test(token.replace(/[-_]/g, ""))).length,
+    };
+  });
+  return {
+    contextHtml: cleanBody.innerHTML,
+    candidates,
+    mainCount: body.querySelectorAll("main").length,
+  };
+}"""
 
 
 class ScanError(Exception):
@@ -95,6 +154,85 @@ def _format_target(target: object) -> str:
     if isinstance(target, list):
         return " >>> ".join(_format_target(part) for part in target)
     return str(target)
+
+
+def _landmark_target(
+    page_evidence: object,
+) -> tuple[str, str, str] | None:
+    if not isinstance(page_evidence, dict):
+        return None
+    context_html = page_evidence.get("contextHtml")
+    candidates = page_evidence.get("candidates")
+    main_count = page_evidence.get("mainCount")
+    if (
+        not isinstance(context_html, str)
+        or not context_html
+        or len(context_html) > LANDMARK_CONTEXT_MAX_LENGTH
+        or not isinstance(candidates, list)
+        or main_count != 0
+    ):
+        return None
+
+    qualifying = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and candidate.get("tag") in {"div", "section", "article"}
+        and candidate.get("identityMatches") == 1
+        and candidate.get("hasHeading") is True
+        and candidate.get("unchanged") is True
+        and isinstance(candidate.get("textLength"), int)
+        and candidate["textLength"] >= 30
+        and isinstance(candidate.get("selector"), str)
+        and candidate["selector"]
+        and isinstance(candidate.get("html"), str)
+        and candidate["html"]
+        and context_html.count(candidate["html"]) == 1
+    ]
+    if len(qualifying) != 1:
+        return None
+    candidate = qualifying[0]
+    selector = candidate["selector"]
+    if not re.fullmatch(
+        r"(?:#[A-Za-z][A-Za-z0-9_-]*|(?:div|section|article)\.[A-Za-z][A-Za-z0-9_-]*)",
+        selector,
+    ):
+        return None
+    return candidate["html"], selector, context_html
+
+
+async def enrich_landmark_repair_evidence(
+    page: Page,
+    scan: ScanResponse,
+) -> ScanResponse:
+    if not any(
+        (violation.rule_id or violation.id) == "landmark-one-main"
+        for violation in scan.violations
+    ):
+        return scan
+
+    page_evidence = await page.evaluate(LANDMARK_CANDIDATE_SCRIPT)
+    target = _landmark_target(page_evidence)
+    if target is None:
+        return scan
+
+    target_html, target_selector, context_html = target
+    violations: list[Violation] = []
+    for violation in scan.violations:
+        if (violation.rule_id or violation.id) != "landmark-one-main":
+            violations.append(violation)
+            continue
+        nodes = list(violation.affected_nodes)
+        if nodes:
+            nodes[0] = nodes[0].model_copy(
+                update={
+                    "repair_target_html": target_html,
+                    "repair_target_selector": target_selector,
+                    "repair_context_html": context_html,
+                }
+            )
+        violations.append(violation.model_copy(update={"affected_nodes": nodes}))
+    return scan.model_copy(update={"violations": violations})
 
 
 def parse_axe_results(url: str, final_url: str, page_title: str, result: object) -> ScanResponse:
@@ -218,12 +356,13 @@ async def scan_website(url: str) -> ScanResponse:
                         "The website attempted to access a non-public network address"
                     )
                 result = await _run_axe(page)
-                return parse_axe_results(
+                scan = parse_axe_results(
                     url=url,
                     final_url=page.url,
                     page_title=await page.title(),
                     result=result,
                 )
+                return await enrich_landmark_repair_evidence(page, scan)
             finally:
                 await browser.close()
     except (InvalidScanTarget, WebsiteUnreachable):

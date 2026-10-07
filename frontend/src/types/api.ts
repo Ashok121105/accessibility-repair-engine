@@ -56,6 +56,9 @@ export interface AffectedNode {
   selectors: string[];
   html: string;
   failure_summary: string | null;
+  repair_target_html?: string | null;
+  repair_target_selector?: string | null;
+  repair_context_html?: string | null;
 }
 
 export interface ScanViolation {
@@ -95,6 +98,7 @@ export interface RepairProposalRequest {
   affected_html: string;
   css_selector: string;
   context: string;
+  context_html?: string;
   page_url: string;
 }
 
@@ -412,6 +416,9 @@ export interface ProjectAffectedElement {
   source_file: string | null;
   source_line: number | null;
   source_mapping_message: string;
+  repair_target_html?: string | null;
+  repair_target_selector?: string | null;
+  repair_context_html?: string | null;
 }
 
 export interface ProjectViolation {

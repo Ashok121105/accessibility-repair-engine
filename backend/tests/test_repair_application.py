@@ -138,6 +138,74 @@ async def test_verified_repair_returns_before_after_axe_findings(
 
 
 @pytest.mark.anyio
+async def test_verified_landmark_repair_changes_only_isolated_page_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_html = (
+        '<div id="main-content"><h1>Welcome</h1>'
+        "<p>This is meaningful existing page content for visitors.</p></div>"
+    )
+    proposed_html = f"<main>{original_html}</main>"
+    context_html = (
+        "<header><h2>Example site</h2></header>"
+        f"{original_html}"
+        "<footer>Contact information</footer>"
+    )
+    proposal = RepairProposal(
+        repair_type="landmark_addition",
+        explanation="Wrap the identified existing content container.",
+        original_html=original_html,
+        proposed_html=proposed_html,
+        confidence=0.9,
+        reasoning_summary="Only the existing content container is wrapped.",
+    )
+    stored_request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="landmark-one-main",
+        selector="#main-content",
+        wcag_criterion="1.3.1 Info and Relationships",
+        context_html=context_html,
+        repair_proposal=proposal,
+    )
+    result = VerificationResult(
+        verification_id=VERIFICATION_ID,
+        status="verified",
+        rule_id="landmark-one-main",
+        original_violation_present=True,
+        repaired_violation_present=False,
+        new_violations=[],
+        scope_safe=True,
+        message="Configured checks passed.",
+        checks=[
+            VerificationCheck(
+                name="repair_scope",
+                passed=True,
+                message="The unchanged existing target is wrapped.",
+            )
+        ],
+    )
+    request = RepairApplicationRequest(
+        verification_id=VERIFICATION_ID,
+        rule_id="landmark-one-main",
+        original_html=original_html,
+        context_html=context_html,
+        proposed_html=proposed_html,
+        selector="#main-content",
+        verification_result=result,
+    )
+    use_recorded(monkeypatch, stored_request, result)
+
+    response = await application.apply_verified_repair(request)
+
+    assert response.status == "improved", response.model_dump()
+    assert "landmark-one-main" in [item.rule_id for item in response.resolved]
+    assert response.remaining == []
+    assert response.new_violations == []
+    assert response.safety_label == "Applied to isolated copy — original website unchanged."
+
+
+@pytest.mark.anyio
 async def test_unverified_repair_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
