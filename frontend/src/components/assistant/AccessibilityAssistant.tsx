@@ -18,9 +18,6 @@ import {
 import {
   appendCaptionHistory,
   createCaptionEntry,
-  detectAccessibleStatusAnnouncements,
-  detectVideoCaptionTracks,
-  extractPaymentStatus,
   type CaptionEntry,
 } from "../../services/captions";
 import type { ShoppingProductSummary } from "../../types/api";
@@ -97,14 +94,25 @@ export default function AccessibilityAssistant() {
   const [highContrastCaptions, setHighContrastCaptions] = useState(false);
   const [captionsPaused, setCaptionsPaused] = useState(false);
   const [isStartingAgent, setIsStartingAgent] = useState(false);
+  const [isStoppingAgent, setIsStoppingAgent] = useState(false);
+  const [isCaptionCaptureActive, setIsCaptionCaptureActive] = useState(false);
   const [isSendingCommand, setIsSendingCommand] = useState(false);
   const [isResettingDemo, setIsResettingDemo] = useState(false);
   const [latestAssistantResponse, setLatestAssistantResponse] = useState("");
   const agentSessionIdRef = useRef("");
+  const startPendingRef = useRef(false);
+  const stopPendingRef = useRef(false);
+  const resetPendingRef = useRef(false);
   const commandPendingRef = useRef(false);
+  const mountedRef = useRef(false);
+  const captionsPausedRef = useRef(captionsPaused);
+  const captionCaptureActiveRef = useRef(false);
+  const captionPanelRef = useRef<HTMLDivElement>(null);
+  const followCaptionsRef = useRef(true);
   const conversationIdRef = useRef(0);
   const assistantLanguageRef = useRef(assistantLanguage);
   assistantLanguageRef.current = assistantLanguage;
+  captionsPausedRef.current = captionsPaused;
 
   const {
     supported: speechOutputSupported,
@@ -119,6 +127,11 @@ export default function AccessibilityAssistant() {
   });
 
   function handleModeChange(interactionMode: AssistantInteractionMode) {
+    if (assistantLanguageRef.current.interaction_mode === interactionMode) return;
+    captionCaptureActiveRef.current = false;
+    setIsCaptionCaptureActive(false);
+    stopVoiceInput();
+    setCaptionsPaused(false);
     setAssistantLanguage((current) => ({ ...current, interaction_mode: interactionMode }));
   }
 
@@ -150,7 +163,7 @@ export default function AccessibilityAssistant() {
     text: string,
     options?: { language?: string; translated?: boolean; severity?: CaptionEntry["severity"] },
   ) {
-    if (captionsPaused) return;
+    if (captionsPausedRef.current) return;
     const entry = createCaptionEntry({
       source,
       text,
@@ -163,8 +176,9 @@ export default function AccessibilityAssistant() {
 
   async function handleStartAgent(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (isResettingDemo) return;
+    if (resetPendingRef.current || startPendingRef.current || agentSessionIdRef.current) return;
     const trimmedUrl = agentUrl.trim();
+    startPendingRef.current = true;
     setIsStartingAgent(true);
     setAgentError("");
     setAgentStatus("Opening website…");
@@ -172,6 +186,14 @@ export default function AccessibilityAssistant() {
       const result = await startAgent(trimmedUrl || agentUrl);
       if (!result.success || !result.session_id) {
         throw new Error(result.message || "The assistant session could not be started.");
+      }
+      if (!mountedRef.current) {
+        try {
+          await stopAgent(result.session_id);
+        } catch (stopError: unknown) {
+          console.error("Could not stop the assistant session created after the page was closed.", stopError);
+        }
+        return;
       }
       agentSessionIdRef.current = result.session_id;
       setAgentSessionId(result.session_id);
@@ -184,6 +206,7 @@ export default function AccessibilityAssistant() {
         addCaptionEntry("system", message, { severity: "info" });
       }
     } catch (startError: unknown) {
+      if (!mountedRef.current) return;
       const message = startError instanceof Error
         ? startError.message
         : "Could not start the assistant. Check that the backend is running and try again.";
@@ -193,14 +216,21 @@ export default function AccessibilityAssistant() {
         "Could not start the assistant. Check the website URL and backend, then try again.",
       ));
     } finally {
-      setIsStartingAgent(false);
+      startPendingRef.current = false;
+      if (mountedRef.current) setIsStartingAgent(false);
     }
   }
 
   async function handleAgentCommand(rawCommand: string) {
     const submittedCommand = rawCommand.trim();
     const activeSessionId = agentSessionIdRef.current;
-    if (!submittedCommand || !activeSessionId || commandPendingRef.current || isResettingDemo) return;
+    if (
+      !submittedCommand ||
+      !activeSessionId ||
+      commandPendingRef.current ||
+      resetPendingRef.current ||
+      stopPendingRef.current
+    ) return;
     commandPendingRef.current = true;
     setIsSendingCommand(true);
     setAgentError("");
@@ -216,6 +246,7 @@ export default function AccessibilityAssistant() {
         preferred_language: assistantLanguageRef.current.preferred_language,
         language_locked: assistantLanguageRef.current.language_source === "manual",
       });
+      if (!mountedRef.current) return;
       const safeMessage = sanitizeAssistantText(result.message);
       const details = result.details;
       if (result.session_active && /^https?:\/\//i.test(result.page_url)) {
@@ -306,11 +337,17 @@ export default function AccessibilityAssistant() {
         ? (result.success ? "Assistant ready for another command." : "Command was not completed.")
         : "Assistant session stopped because the page requires attention.");
       if (!result.session_active) {
+        captionCaptureActiveRef.current = false;
+        setIsCaptionCaptureActive(false);
+        captionsPausedRef.current = false;
+        setCaptionsPaused(false);
+        stopVoiceInput();
         agentSessionIdRef.current = "";
         setAgentSessionId("");
         setCurrentWebsite("");
       }
     } catch (commandError: unknown) {
+      if (!mountedRef.current) return;
       const message = commandError instanceof Error
         ? commandError.message
         : "The assistant could not process that command. Please try again.";
@@ -320,6 +357,11 @@ export default function AccessibilityAssistant() {
         ? "Your assistant session is no longer active. Start the assistant again."
         : message;
       if (sessionMissing) {
+        captionCaptureActiveRef.current = false;
+        setIsCaptionCaptureActive(false);
+        captionsPausedRef.current = false;
+        setCaptionsPaused(false);
+        stopVoiceInput();
         agentSessionIdRef.current = "";
         setAgentSessionId("");
         setCurrentWebsite("");
@@ -333,8 +375,10 @@ export default function AccessibilityAssistant() {
       addConversationEntry("Assistant", safeError);
     } finally {
       commandPendingRef.current = false;
-      setIsSendingCommand(false);
-      setCommand("");
+      if (mountedRef.current) {
+        setIsSendingCommand(false);
+        setCommand("");
+      }
     }
   }
 
@@ -345,11 +389,19 @@ export default function AccessibilityAssistant() {
 
   async function handleStopAgent() {
     const activeSessionId = agentSessionIdRef.current;
-    if (!activeSessionId || isResettingDemo) return;
+    if (!activeSessionId || resetPendingRef.current || stopPendingRef.current || commandPendingRef.current) return;
+    stopPendingRef.current = true;
+    captionCaptureActiveRef.current = false;
+    setIsCaptionCaptureActive(false);
+    captionsPausedRef.current = false;
+    setCaptionsPaused(false);
+    stopVoiceInput();
+    setIsStoppingAgent(true);
     setAgentError("");
     setAgentStatus("Stopping assistant…");
     try {
       await stopAgent(activeSessionId);
+      if (!mountedRef.current) return;
       agentSessionIdRef.current = "";
       setAgentSessionId("");
       setCurrentWebsite("");
@@ -360,6 +412,7 @@ export default function AccessibilityAssistant() {
         addCaptionEntry("system", message, { severity: "warning" });
       }
     } catch (stopError: unknown) {
+      if (!mountedRef.current) return;
       const message = stopError instanceof Error
         ? stopError.message
         : "Could not stop the assistant. Please try again.";
@@ -376,12 +429,21 @@ export default function AccessibilityAssistant() {
           "Could not stop the assistant. Please try again.",
         ));
       }
+    } finally {
+      stopPendingRef.current = false;
+      if (mountedRef.current) setIsStoppingAgent(false);
     }
   }
 
   async function handleResetDemo() {
-    if (isStartingAgent || isSendingCommand || isResettingDemo) return;
+    if (startPendingRef.current || commandPendingRef.current || resetPendingRef.current || stopPendingRef.current) return;
     const activeSessionId = agentSessionIdRef.current;
+    resetPendingRef.current = true;
+    captionCaptureActiveRef.current = false;
+    setIsCaptionCaptureActive(false);
+    captionsPausedRef.current = false;
+    setCaptionsPaused(false);
+    stopVoiceInput();
     setIsResettingDemo(true);
     setAgentError("");
     setAgentStatus("Resetting demo…");
@@ -389,6 +451,7 @@ export default function AccessibilityAssistant() {
       if (activeSessionId) {
         await stopAgent(activeSessionId);
       }
+      if (!mountedRef.current) return;
       agentSessionIdRef.current = "";
       setAgentSessionId("");
       setCurrentWebsite("");
@@ -399,10 +462,12 @@ export default function AccessibilityAssistant() {
       setCommand("");
       setConversation([]);
       setCaptions([]);
+      followCaptionsRef.current = true;
       setLatestAssistantResponse("");
       stopSpeaking();
       setAgentStatus("Demo reset. Saved scans and certificates are unchanged.");
     } catch (resetError: unknown) {
+      if (!mountedRef.current) return;
       const message = resetError instanceof Error
         ? resetError.message
         : "Could not reset the demo. Please try again.";
@@ -417,6 +482,7 @@ export default function AccessibilityAssistant() {
         setCommand("");
         setConversation([]);
         setCaptions([]);
+        followCaptionsRef.current = true;
         setLatestAssistantResponse("");
         stopSpeaking();
         setAgentStatus("Demo reset. Saved scans and certificates are unchanged.");
@@ -428,17 +494,22 @@ export default function AccessibilityAssistant() {
         ));
       }
     } finally {
-      setIsResettingDemo(false);
+      resetPendingRef.current = false;
+      if (mountedRef.current) setIsResettingDemo(false);
     }
   }
 
-  useEffect(() => () => {
-    const activeSessionId = agentSessionIdRef.current;
-    if (activeSessionId) {
-      void stopAgent(activeSessionId).catch((stopError: unknown) => {
-        console.error("Could not stop the assistant during page cleanup.", stopError);
-      });
-    }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const activeSessionId = agentSessionIdRef.current;
+      if (activeSessionId) {
+        void stopAgent(activeSessionId).catch((stopError: unknown) => {
+          console.error("Could not stop the assistant during page cleanup.", stopError);
+        });
+      }
+    };
   }, []);
 
   const {
@@ -451,57 +522,77 @@ export default function AccessibilityAssistant() {
     stop: stopVoiceInput,
   } = useSpeechRecognition({
     language: assistantLanguage.active_language,
-    enabled: assistantLanguage.interaction_mode === "blind" && Boolean(agentSessionId),
+    enabled: assistantLanguage.interaction_mode === "blind"
+      ? Boolean(agentSessionId)
+      : isCaptionCaptureActive,
+    continuous: assistantLanguage.interaction_mode === "hearing",
     onFinalTranscript: (transcript) => {
+      if (assistantLanguageRef.current.interaction_mode === "hearing") {
+        if (captionCaptureActiveRef.current) {
+          addCaptionEntry("microphone", transcript, {
+            language: assistantLanguageRef.current.active_language,
+          });
+        }
+        return;
+      }
       setCommand(transcript);
       void handleAgentCommand(transcript);
     },
   });
 
+  function startCaptionCapture() {
+    if (!speechSupported || captionsPausedRef.current) return;
+    captionCaptureActiveRef.current = true;
+    setIsCaptionCaptureActive(true);
+  }
+
+  function stopCaptionCapture() {
+    captionCaptureActiveRef.current = false;
+    setIsCaptionCaptureActive(false);
+    captionsPausedRef.current = false;
+    setCaptionsPaused(false);
+    stopVoiceInput();
+  }
+
+  function toggleCaptionsPaused() {
+    if (!captionsPausedRef.current) {
+      captionsPausedRef.current = true;
+      setCaptionsPaused(true);
+      captionCaptureActiveRef.current = false;
+      stopVoiceInput();
+      return;
+    }
+
+    captionsPausedRef.current = false;
+    setCaptionsPaused(false);
+    if (assistantLanguageRef.current.interaction_mode === "hearing") {
+      captionCaptureActiveRef.current = true;
+      startVoiceInput();
+    } else {
+      captionCaptureActiveRef.current = false;
+    }
+  }
+
+  function clearCaptions() {
+    followCaptionsRef.current = true;
+    setCaptions([]);
+  }
+
+  useEffect(() => {
+    if (isCaptionCaptureActive && assistantLanguage.interaction_mode === "hearing") {
+      startVoiceInput();
+    }
+  }, [assistantLanguage.interaction_mode, isCaptionCaptureActive, startVoiceInput]);
+
+  useEffect(() => {
+    const panel = captionPanelRef.current;
+    if (panel && followCaptionsRef.current) panel.scrollTop = panel.scrollHeight;
+  }, [captions]);
+
   function handleReplayResponse() {
     if (assistantLanguage.interaction_mode !== "blind" || !latestAssistantResponse.trim()) return;
     speakResponse(latestAssistantResponse, assistantLanguage.active_language);
   }
-
-  useEffect(() => {
-    if (assistantLanguage.interaction_mode !== "hearing") return;
-
-    const detectPageAnnouncements = () => {
-      const documentText = document.body?.innerText ?? "";
-      const trackSummary = detectVideoCaptionTracks(document.documentElement.outerHTML);
-      if (trackSummary.captionsAvailable) {
-        addCaptionEntry("video", `Video captions detected: ${trackSummary.captionTracks.map((track) => `${track.label} (${track.kind})`).join(", ")}`, {
-          language: assistantLanguageRef.current.active_language,
-          severity: "info",
-        });
-      }
-      const paymentStatus = extractPaymentStatus(documentText);
-      if (paymentStatus.paymentDetected) {
-        addCaptionEntry("payment", `Payment status: ${paymentStatus.status}`, {
-          language: assistantLanguageRef.current.active_language,
-          severity: paymentStatus.status === "successful" ? "success" : paymentStatus.status === "failed" ? "error" : "warning",
-        });
-      }
-      const announcements = detectAccessibleStatusAnnouncements(documentText);
-      if (announcements.length > 0) {
-        addCaptionEntry("website", `Accessible status: ${announcements.join(", ")}`, {
-          language: assistantLanguageRef.current.active_language,
-          severity: "info",
-        });
-      }
-    };
-
-    detectPageAnnouncements();
-    const observer = new MutationObserver(() => {
-      window.setTimeout(() => {
-        detectPageAnnouncements();
-      }, 150);
-    });
-    if (document.body) {
-      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-    }
-    return () => observer.disconnect();
-  }, [assistantLanguage.interaction_mode]);
 
   return (
     <section aria-label="Accessibility Assistant workspace" className="assistant-panel">
@@ -554,6 +645,7 @@ export default function AccessibilityAssistant() {
           <label htmlFor="assistant-preferred-language">Preferred language</label>
           <select
             id="assistant-preferred-language"
+            disabled={isVoiceListening || isCaptionCaptureActive}
             onChange={(event) => handleLanguageChange(event.target.value)}
             value={assistantLanguage.preferred_language}
           >
@@ -578,7 +670,7 @@ export default function AccessibilityAssistant() {
             <p>Automatic language detection is not enabled in Blind Mode; the selected preferred language is used for voice input and TTS.</p>
             {!speechSupported ? (
               <p className="assistant-voice-error" role="alert">
-                Voice input is not supported in this browser. Please use a supported browser or switch to Hearing Mode.
+                Voice input is not supported in this browser. Use text input instead.
               </p>
             ) : (
               <div className="assistant-voice-controls">
@@ -653,19 +745,21 @@ export default function AccessibilityAssistant() {
               <div className="assistant-caption-controls" role="group" aria-label="Caption controls">
                 <button
                   className="assistant-secondary-button"
-                  onClick={() => setCaptionsPaused((current) => !current)}
+                  disabled={!isCaptionCaptureActive && !captionsPaused}
+                  onClick={toggleCaptionsPaused}
                   type="button"
                 >
                   {captionsPaused ? "Resume captions" : "Pause captions"}
                 </button>
                 <button
                   className="assistant-secondary-button"
-                  onClick={() => setCaptions([])}
+                  onClick={clearCaptions}
                   type="button"
                 >
                   Clear captions
                 </button>
                 <button
+                  aria-label="Increase caption text size"
                   className="assistant-secondary-button"
                   onClick={() => setCaptionFontScale((current) => Math.min(1.5, Number((current + 0.1).toFixed(1))))}
                   type="button"
@@ -673,6 +767,7 @@ export default function AccessibilityAssistant() {
                   A+
                 </button>
                 <button
+                  aria-label="Decrease caption text size"
                   className="assistant-secondary-button"
                   onClick={() => setCaptionFontScale((current) => Math.max(0.9, Number((current - 0.1).toFixed(1))))}
                   type="button"
@@ -689,18 +784,71 @@ export default function AccessibilityAssistant() {
                 </label>
               </div>
             </div>
-            <p role="status" aria-live="polite">
-              {captionsPaused ? "Captions paused." : "Live captions are active. Website audio capture is not available in this browser; website captions and accessible text announcements are still supported."}
+            <p aria-live="polite" role="status">
+              {captionsPaused
+                ? "Captions paused. Microphone capture is stopped."
+                : isVoiceListening
+                  ? "Listening for speech from your microphone."
+                  : isCaptionCaptureActive
+                    ? voiceStatus || "Microphone captions are ready."
+                    : "Microphone captions are stopped."}
             </p>
+            <p>
+              Microphone captions use the selected language and browser speech-recognition service. They do not capture website or system audio, or translate speech.
+            </p>
+            {!speechSupported ? (
+              <p className="assistant-voice-error" role="status">
+                Live microphone captions are not supported in this browser.
+              </p>
+            ) : (
+              <div className="assistant-controls">
+                {!isCaptionCaptureActive ? (
+                  <button
+                    className="primary-button"
+                    disabled={isStoppingAgent || isResettingDemo}
+                    onClick={startCaptionCapture}
+                    type="button"
+                  >
+                    <Mic aria-hidden="true" size={16} /> Start Live Captions
+                  </button>
+                ) : (
+                  <button
+                    className="assistant-secondary-button"
+                    onClick={stopCaptionCapture}
+                    type="button"
+                  >
+                    <MicOff aria-hidden="true" size={16} /> Stop Live Captions
+                  </button>
+                )}
+                {isCaptionCaptureActive && voiceError && (
+                  <button
+                    className="assistant-secondary-button"
+                    onClick={startVoiceInput}
+                    type="button"
+                  >
+                    Retry Live Captions
+                  </button>
+                )}
+              </div>
+            )}
+            {voiceError && speechSupported && <p className="assistant-voice-error" role="alert">{voiceError}</p>}
             <div
               aria-live="polite"
               aria-relevant="additions text"
               className={`assistant-caption-panel ${highContrastCaptions ? "high-contrast" : ""}`}
+              onScroll={(event) => {
+                const panel = event.currentTarget;
+                followCaptionsRef.current =
+                  panel.scrollHeight - panel.scrollTop - panel.clientHeight <= 24;
+              }}
+              ref={captionPanelRef}
               role="log"
               style={{ fontSize: `${captionFontScale}rem` }}
+              tabIndex={0}
+              aria-label="Caption history"
             >
               {captions.length === 0 ? (
-                <p>Live captions will appear here when audio/caption processing is enabled.</p>
+                <p>Captured speech and assistant responses will appear here.</p>
               ) : (
                 captions.map((entry) => (
                   <div className={`caption-entry caption-${entry.severity}`} key={entry.id}>
@@ -746,7 +894,7 @@ export default function AccessibilityAssistant() {
                 </ol>
               </section>
             )}
-            <p>Written commands are detected when confidence is sufficient; otherwise the preferred language is used.</p>
+            <p>Typed commands can be automatically detected when the selected language has not been manually locked.</p>
           </section>
         )}
       </section>
@@ -783,7 +931,7 @@ export default function AccessibilityAssistant() {
             />
             <button
               className="primary-button"
-              disabled={isStartingAgent || isResettingDemo || Boolean(agentSessionId)}
+              disabled={isStartingAgent || isStoppingAgent || isResettingDemo || Boolean(agentSessionId)}
               type="submit"
             >
               {isStartingAgent ? "Starting…" : "Start Assistant"}
@@ -820,7 +968,7 @@ export default function AccessibilityAssistant() {
             <label htmlFor="assistant-agent-command">Text command</label>
             <div className="assistant-text-entry">
               <input
-                disabled={!agentSessionId || isSendingCommand || isResettingDemo}
+                disabled={!agentSessionId || isSendingCommand || isStoppingAgent || isResettingDemo}
                 id="assistant-agent-command"
                 onChange={(event) => setCommand(event.target.value)}
                 placeholder="Open Flipkart"
@@ -828,7 +976,7 @@ export default function AccessibilityAssistant() {
               />
               <button
                 className="primary-button"
-                disabled={!command.trim() || !agentSessionId || isSendingCommand || isStartingAgent || isResettingDemo}
+                disabled={!command.trim() || !agentSessionId || isSendingCommand || isStartingAgent || isStoppingAgent || isResettingDemo}
                 type="submit"
               >
                 <Send size={15} /> {isSendingCommand ? "Sending…" : "Send Command"}
@@ -839,16 +987,16 @@ export default function AccessibilityAssistant() {
           {agentSessionId && (
             <button
               className="assistant-secondary-button"
-              disabled={isSendingCommand || isStartingAgent || isResettingDemo}
+              disabled={isSendingCommand || isStartingAgent || isStoppingAgent || isResettingDemo}
               onClick={() => void handleStopAgent()}
               type="button"
             >
-              Stop Assistant
+              {isStoppingAgent ? "Stopping…" : "Stop Assistant"}
             </button>
           )}
           <button
             className="assistant-secondary-button"
-            disabled={isSendingCommand || isStartingAgent || isResettingDemo}
+            disabled={isSendingCommand || isStartingAgent || isStoppingAgent || isResettingDemo}
             onClick={() => void handleResetDemo()}
             type="button"
           >

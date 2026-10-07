@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -42,12 +42,13 @@ class FakeSpeechRecognition implements BrowserSpeechRecognition {
     FakeSpeechRecognition.instances.push(this);
   }
 
-  emitResult(transcript: string) {
-    const result: SpeechRecognitionResultLike = Object.assign(
-      [{ transcript }],
-      { isFinal: true, length: 1 },
-    );
-    this.onresult?.({ resultIndex: 0, results: [result] });
+  emitResult(transcript: string, resultIndex = 0) {
+    const results = Array.from({ length: resultIndex + 1 }, (_, index) =>
+      Object.assign(
+        [{ transcript: index === resultIndex ? transcript : "" }],
+        { isFinal: true, length: 1 },
+      ) as SpeechRecognitionResultLike);
+    this.onresult?.({ resultIndex, results });
   }
 }
 
@@ -114,7 +115,7 @@ describe("AccessibilityAssistant", () => {
     expect(screen.getByText(/Automatic language detection is not enabled/)).toBeInTheDocument();
   });
 
-  it("selects Hearing Mode and displays the live-caption placeholder and text command", async () => {
+  it("selects Hearing Mode and explains microphone captions and text commands", async () => {
     const user = userEvent.setup();
     render(<AccessibilityAssistant />);
     await user.click(screen.getByRole("radio", { name: /Blind Mode/ }));
@@ -123,8 +124,9 @@ describe("AccessibilityAssistant", () => {
     expect(screen.getByRole("radio", { name: /Hearing Mode/ })).toBeChecked();
     expect(screen.getByRole("heading", { name: "Live captions" })).toBeInTheDocument();
     expect(
-      screen.getByText("Live captions will appear here when audio/caption processing is enabled."),
+      screen.getByText("Microphone captions use the selected language and browser speech-recognition service. They do not capture website or system audio, or translate speech."),
     ).toBeInTheDocument();
+    expect(screen.getByText("Live microphone captions are not supported in this browser.")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Text command" })).toBeInTheDocument();
   });
 
@@ -163,6 +165,31 @@ describe("AccessibilityAssistant", () => {
     expect(screen.getByRole("status", { name: "Preferred language status" })).toHaveTextContent(
       "Language: Tamil · Source: Manual",
     );
+  });
+
+  it("starts only one session and closes it if startup resolves after unmount", async () => {
+    let resolveStart: ((response: typeof startedSession) => void) | undefined;
+    const pendingStart = new Promise<typeof startedSession>((resolve) => {
+      resolveStart = resolve;
+    });
+    vi.mocked(startAgent).mockReturnValue(pendingStart);
+    const { unmount } = render(<AccessibilityAssistant />);
+    const form = screen.getByRole("textbox", { name: "Flipkart website URL" }).closest("form");
+
+    expect(form).not.toBeNull();
+    if (!form) return;
+    fireEvent.submit(form);
+    fireEvent.submit(form);
+    expect(startAgent).toHaveBeenCalledOnce();
+    unmount();
+
+    await act(async () => {
+      resolveStart?.(startedSession);
+      await pendingStart;
+      await Promise.resolve();
+    });
+
+    expect(stopAgent).toHaveBeenCalledWith("session-1");
   });
 
   it("preserves the selected mode while sending a command and displays the Open Flipkart response", async () => {
@@ -360,14 +387,103 @@ describe("AccessibilityAssistant", () => {
     expect(await screen.findByText("Flipkart is open.")).toBeInTheDocument();
   });
 
-  it("does not start a microphone in Hearing Mode", async () => {
+  it("does not start microphone capture in Hearing Mode until explicitly requested", async () => {
     FakeSpeechRecognition.instances = [];
     vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
     render(<AccessibilityAssistant />);
 
     expect(screen.getByRole("heading", { name: "Live captions" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Start Voice Input/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Start Live Captions/ })).toBeInTheDocument();
     expect(FakeSpeechRecognition.instances).toHaveLength(0);
+  });
+
+  it("shows final microphone speech without a backend session and stops without accepting late results", async () => {
+    FakeSpeechRecognition.instances = [];
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const user = userEvent.setup();
+    render(<AccessibilityAssistant />);
+
+    await user.click(screen.getByRole("radio", { name: /Hearing Mode/ }));
+    await user.click(screen.getByRole("button", { name: /Start Live Captions/ }));
+
+    const recognition = FakeSpeechRecognition.instances[0];
+    expect(recognition.continuous).toBe(true);
+    expect(recognition.lang).toBe("en-IN");
+    act(() => recognition.emitResult("Hello from the microphone"));
+
+    expect(await screen.findByText("Hello from the microphone")).toBeInTheDocument();
+    expect(screen.getByText("MICROPHONE")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Stop Live Captions/ }));
+    const captionCount = screen.getAllByText(/MICROPHONE/).length;
+    act(() => recognition.emitResult("Speech after stop"));
+
+    expect(recognition.abort).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Speech after stop")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/MICROPHONE/)).toHaveLength(captionCount);
+  });
+
+  it.each([
+    ["te", "te-IN"],
+    ["ta", "ta-IN"],
+    ["hi", "hi-IN"],
+  ] as const)("uses the selected %s locale for microphone captions", async (language, locale) => {
+    FakeSpeechRecognition.instances = [];
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const user = userEvent.setup();
+    render(<AccessibilityAssistant />);
+
+    await user.click(screen.getByRole("radio", { name: /Hearing Mode/ }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Preferred language" }), language);
+    await user.click(screen.getByRole("button", { name: /Start Live Captions/ }));
+
+    expect(FakeSpeechRecognition.instances[0].lang).toBe(locale);
+    expect(screen.getByRole("combobox", { name: "Preferred language" })).toBeDisabled();
+  });
+
+  it("pauses microphone capture and resumes with a fresh recognition session", async () => {
+    FakeSpeechRecognition.instances = [];
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const user = userEvent.setup();
+    render(<AccessibilityAssistant />);
+
+    await user.click(screen.getByRole("radio", { name: /Hearing Mode/ }));
+    await user.click(screen.getByRole("button", { name: /Start Live Captions/ }));
+    const firstRecognition = FakeSpeechRecognition.instances[0];
+    await user.click(screen.getByRole("button", { name: "Pause captions" }));
+
+    expect(firstRecognition.abort).toHaveBeenCalledOnce();
+    expect(screen.getByText("Captions paused. Microphone capture is stopped.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Resume captions" }));
+
+    expect(FakeSpeechRecognition.instances).toHaveLength(2);
+    expect(FakeSpeechRecognition.instances[1].start).toHaveBeenCalledOnce();
+    act(() => FakeSpeechRecognition.instances[1].emitResult("Resumed speech"));
+    expect(await screen.findByText("Resumed speech")).toBeInTheDocument();
+  });
+
+  it("keeps caption auto-follow inside the panel and honors a user's scroll position", async () => {
+    FakeSpeechRecognition.instances = [];
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const user = userEvent.setup();
+    render(<AccessibilityAssistant />);
+
+    await user.click(screen.getByRole("radio", { name: /Hearing Mode/ }));
+    await user.click(screen.getByRole("button", { name: /Start Live Captions/ }));
+    const panel = screen.getByRole("log", { name: "Caption history" });
+    Object.defineProperties(panel, {
+      scrollHeight: { configurable: true, value: 500 },
+      clientHeight: { configurable: true, value: 200 },
+    });
+    act(() => FakeSpeechRecognition.instances[0].emitResult("First caption"));
+    expect(panel.scrollTop).toBe(500);
+
+    panel.scrollTop = 100;
+    fireEvent.scroll(panel);
+    act(() => FakeSpeechRecognition.instances[0].emitResult("Second caption", 1));
+
+    expect(panel.scrollTop).toBe(100);
+    expect(document.documentElement.scrollTop).toBe(0);
   });
 
   it("explains when voice input is unsupported", async () => {
@@ -379,7 +495,7 @@ describe("AccessibilityAssistant", () => {
     await user.click(screen.getByRole("radio", { name: /Blind Mode/ }));
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Voice input is not supported in this browser. Please use a supported browser or switch to Hearing Mode.",
+      "Voice input is not supported in this browser. Use text input instead.",
     );
     expect(screen.queryByRole("button", { name: /Start Voice Input/ })).not.toBeInTheDocument();
   });

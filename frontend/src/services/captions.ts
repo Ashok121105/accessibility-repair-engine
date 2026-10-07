@@ -1,4 +1,4 @@
-export type CaptionSource = "assistant" | "website" | "video" | "system" | "payment" | "navigation";
+export type CaptionSource = "assistant" | "microphone" | "website" | "video" | "system" | "payment" | "navigation";
 export type CaptionSeverity = "info" | "success" | "warning" | "error";
 
 export interface CaptionEntry {
@@ -14,11 +14,12 @@ export interface CaptionEntry {
 export const MAX_CAPTION_HISTORY = 100;
 
 const SENSITIVE_CAPTION_PATTERNS = [
-  /\bOTP\b[\s:=-]*\d+/i,
-  /\b(?:CVV|CVC|security code|verification code)\b[\s:=-]*\d+/i,
-  /\bUPI PIN\b[\s:=-]*\d+/i,
-  /\bpassword\b[\s:=-]*[A-Za-z0-9!@#$%^&*()_+=-]+/i,
+  /\b(?:OTP|one[- ]time password|passcode|security code|verification code)\b(?:\s+(?:is|equals))?[\s:=-]*[A-Za-z0-9-]{3,}/i,
+  /\b(?:CVV|CVC)\b(?:\s+(?:is|equals))?[\s:=-]*\d{3,4}/i,
+  /\b(?:UPI PIN|payment PIN)\b(?:\s+(?:is|equals))?[\s:=-]*\d{4,6}/i,
+  /\bpassword\b(?:\s+(?:is|equals))?[\s:=-]*[A-Za-z0-9!@#$%^&*()_+=-]+/i,
   /\bcard number\b[\s:=-]*\d[\d -]{8,}\d/i,
+  /\b(?:phone|mobile)(?: number)?\b(?:\s+(?:is|equals))?[\s:=-]*\+?\d[\d -]{7,}\d/i,
 ];
 
 export function sanitizeCaptionText(text: string): string {

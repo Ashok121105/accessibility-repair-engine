@@ -819,6 +819,22 @@ h1 span { color: #0d9d82; }
 .assistant-mode-detail h3 { margin: 0 0 8px; color: #203a37; font-size: 16px; }
 .assistant-mode-detail p { margin: 5px 0; color: #40574f; font-size: 14px; line-height: 1.55; }
 .assistant-mode-detail p:last-child { margin-bottom: 0; }
+.assistant-caption-header { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.assistant-caption-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.assistant-caption-panel { display: grid; gap: 8px; max-height: 16rem; min-height: 5rem; overflow-y: auto; overscroll-behavior: contain; padding: 12px; border: 1px solid #dce8e2; border-radius: 6px; color: #263d37; background: #fff; overflow-wrap: anywhere; }
+.assistant-caption-panel:focus-visible { outline: 3px solid #45c9ad; outline-offset: 2px; }
+.assistant-caption-panel > p { margin: 0; }
+.caption-entry { padding: 8px 10px; border-left: 3px solid #75a999; border-radius: 4px; background: #f8fbf9; }
+.caption-entry p { margin: 4px 0 0; color: #263d37; line-height: 1.5; }
+.caption-meta { display: flex; flex-wrap: wrap; gap: 6px 10px; color: #536a62; font-size: .75em; }
+.caption-source { font-weight: 700; }
+.caption-success { border-left-color: #23845c; }
+.caption-warning { border-left-color: #b37b1e; }
+.caption-error { border-left-color: #bd493f; }
+.assistant-caption-panel.high-contrast { border-color: #152b29; color: #fff; background: #152b29; }
+.assistant-caption-panel.high-contrast .caption-entry { border-color: #7fe2c2; color: #fff; background: #203b37; }
+.assistant-caption-panel.high-contrast .caption-entry p,
+.assistant-caption-panel.high-contrast .caption-meta { color: #fff; }
 .assistant-voice-controls { display: grid; gap: 10px; margin-top: 12px; }
 .assistant-voice-status { display: flex; align-items: center; gap: 8px; color: #344e47; font-size: 14px; font-weight: 650; }
 .assistant-listening-indicator { width: 10px; height: 10px; flex: 0 0 auto; border-radius: 50%; background: #b42318; }
@@ -871,6 +887,10 @@ h1 span { color: #0d9d82; }
 .help-link { font-size: 12px; }
 
 @media (max-width: 620px) {
+  .topbar { gap: 8px; }
+  .breadcrumbs > span, .breadcrumbs > b { display: none; }
+  .breadcrumbs strong { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar-right { gap: 5px; }
   .assistant-mode-card, .assistant-card { padding: 14px; }
   .assistant-mode-selector { grid-template-columns: 1fr; padding: 10px; }
   .assistant-language-controls { grid-template-columns: 1fr; max-width: none; }
