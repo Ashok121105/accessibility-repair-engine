@@ -33,6 +33,7 @@ import AccessibilityAssistant from "./components/assistant/AccessibilityAssistan
 
 const workflow = ["Scan", "Detect", "Propose", "Verify", "Apply", "Re-scan", "Hindsight"];
 const impactFilters = ["All", "Critical", "Serious", "Moderate", "Minor"] as const;
+const HEALTH_RETRY_DELAYS_MS = [500, 1500];
 type ImpactFilter = (typeof impactFilters)[number];
 type WorkspacePage = "overview" | "scan" | "certificates" | "history" | "assistant";
 type RepairWorkflowStage = "repair" | "verify" | "certify";
@@ -55,6 +56,22 @@ const pageLabels: Record<WorkspacePage, string> = {
 function pageFromLocation(): WorkspacePage {
   const hash = window.location.hash.slice(1);
   return Object.keys(pageLabels).includes(hash) ? (hash as WorkspacePage) : "overview";
+}
+
+async function checkBackendHealth(): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await getHealth();
+      return;
+    } catch (error: unknown) {
+      const transient =
+        error instanceof TypeError ||
+        (error instanceof Error && /Health check failed \(5\d\d\)/.test(error.message));
+      const delay = HEALTH_RETRY_DELAYS_MS[attempt];
+      if (!transient || delay === undefined) throw error;
+      await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
+    }
+  }
 }
 
 function App() {
@@ -143,7 +160,7 @@ function App() {
   useEffect(() => {
     let active = true;
 
-    getHealth()
+    checkBackendHealth()
       .then(() => {
         if (active) setServiceState("online");
       })

@@ -1252,4 +1252,14 @@ describe("dashboard", () => {
     expect(await screen.findByText("Start the API and refresh to retry.", { exact: false })).toBeInTheDocument();
     expect(screen.getByText("Backend unavailable")).toBeInTheDocument();
   });
+
+  it("recovers from a transient startup fetch failure without requiring a refresh", async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    render(<App />);
+
+    expect(await screen.findByText("Backend connected", {}, { timeout: 3000 })).toBeInTheDocument();
+    expect(screen.queryByText("Backend unavailable")).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).endsWith("/api/health"))).toHaveLength(2);
+  });
 });
