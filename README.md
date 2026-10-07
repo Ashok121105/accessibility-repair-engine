@@ -29,6 +29,8 @@ Requirements: Node.js with npm, and Python 3.10 or newer.
 
 Set `GEMINI_API_KEY` in `backend/.env` to enable proposal generation. The backend loads this file regardless of the working directory; process environment variables take precedence. The API key is read only by the backend and sent to Gemini in a request header. Never place it in frontend variables or commit an `.env` file. Scanning works without a Gemini key; proposal requests return a clear unavailable error.
 
+OpenAI can optionally be configured as a fallback by setting `OPENAI_API_KEY` and `OPENAI_MODEL` in the backend environment. Gemini is always tried first; OpenAI is attempted only after a retryable Gemini provider failure and only for rules supported by repair verification. If either OpenAI setting is missing, the fallback is not used. Both provider keys remain backend-only.
+
 ### Run the backend
 
 From the repository root:

@@ -13,7 +13,13 @@ async def propose_accessibility_repair(
     request: RepairProposalRequest,
 ) -> RepairProposal:
     try:
-        proposal = await propose_repair(request, get_settings().gemini_api_key)
+        settings = get_settings()
+        proposal = await propose_repair(
+            request,
+            settings.gemini_api_key,
+            settings.openai_api_key,
+            settings.openai_model,
+        )
         if proposal.repair_type != "repair_not_safe":
             save_proposal(request, proposal)
         return proposal

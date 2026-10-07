@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     api_port: int = 8000
     frontend_origin: str = "http://localhost:5173"
     gemini_api_key: str | None = None
+    openai_api_key: str | None = None
+    openai_model: str | None = None
 
     @property
     def is_production(self) -> bool:
@@ -24,6 +26,13 @@ class Settings(BaseSettings):
     @field_validator("gemini_api_key", mode="before")
     @classmethod
     def normalize_empty_gemini_key(cls, value: str | None) -> str | None:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("openai_api_key", "openai_model", mode="before")
+    @classmethod
+    def normalize_empty_openai_settings(cls, value: str | None) -> str | None:
         if isinstance(value, str) and not value.strip():
             return None
         return value
