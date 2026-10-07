@@ -126,6 +126,10 @@ def test_translation_provider_handles_all_supported_language_pairs(
     result = asyncio.run(translate_text("Flipkart is open", source, target, api_key="server-key"))
 
     assert result == translated
+    assert requests[0]["url"] == (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-3.6-flash:generateContent"
+    )
     assert requests[0]["headers"] == {"x-goog-api-key": "server-key"}
     assert "server-key" not in str(requests[0]["url"])
 

@@ -10,7 +10,7 @@ from html.parser import HTMLParser
 from backend.app.repair.models import RepairProposal, RepairProposalRequest
 
 logger = logging.getLogger(__name__)
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"

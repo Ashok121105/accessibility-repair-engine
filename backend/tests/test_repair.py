@@ -84,6 +84,10 @@ async def test_generates_valid_proposal_with_server_only_api_key(monkeypatch: py
 
     proposal = await service.propose_repair(request(), "test-secret")
 
+    assert posted[0]["url"] == (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-3.6-flash:generateContent"
+    )
     assert posted[0]["headers"] == {"x-goog-api-key": "test-secret"}
     assert "test-secret" not in str(posted[0]["url"])
     prompt = posted[0]["json"]["contents"][0]["parts"][0]["text"]
