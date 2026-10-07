@@ -1330,7 +1330,7 @@ describe("dashboard", () => {
     await user.click(screen.getByRole("button", { name: /^scan website$/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The website could not be reached",
+      "Website could not be reached.",
     );
   });
 

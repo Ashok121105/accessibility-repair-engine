@@ -117,22 +117,47 @@ LANDMARK_CANDIDATE_SCRIPT = """(options = {}) => {
 
 class ScanError(Exception):
     status_code = 502
+    user_message = "The website scan could not be completed."
 
 
 class InvalidScanTarget(ScanError):
     status_code = 400
+    user_message = "This website address is blocked by the public-network security policy."
+
+
+class WebsiteNotFound(ScanError):
+    status_code = 502
+    user_message = "Website could not be found. Please check the domain."
 
 
 class WebsiteUnreachable(ScanError):
     status_code = 502
+    user_message = "Website could not be reached."
 
 
 class ScanTimedOut(ScanError):
     status_code = 504
+    user_message = "Website took too long to respond."
+
+
+class PageNotFound(ScanError):
+    status_code = 404
+    user_message = "The requested page was not found."
+
+
+class WebsiteServerError(ScanError):
+    status_code = 502
+    user_message = "The website returned a server error."
+
+
+class WebsiteHttpError(ScanError):
+    status_code = 502
+    user_message = "The website returned an HTTP error."
 
 
 class ScannerFailure(ScanError):
     status_code = 500
+    user_message = "The website was reachable, but accessibility scanning could not be completed."
 
 
 def _is_public_address(address: str) -> bool:
@@ -169,14 +194,31 @@ async def _ensure_public_http_url(url: str) -> None:
         )
     except InvalidScanTarget:
         raise
-    except (OSError, ValueError) as error:
-        raise WebsiteUnreachable("The website hostname could not be resolved") from error
+    except socket.gaierror as error:
+        raise WebsiteNotFound from error
+    except ValueError as error:
+        raise InvalidScanTarget from error
+    except OSError as error:
+        raise WebsiteUnreachable from error
 
     addresses = {record[4][0] for record in records}
     if not addresses:
-        raise WebsiteUnreachable("The website hostname did not resolve to an address")
+        raise WebsiteNotFound
     if any(not _is_public_address(address) for address in addresses):
         raise InvalidScanTarget("Only publicly routable websites can be scanned")
+
+
+def _validate_navigation_response(response: object | None) -> None:
+    if response is None:
+        return
+    status = getattr(response, "status", None)
+    if not isinstance(status, int) or status < 400:
+        return
+    if status == 404:
+        raise PageNotFound
+    if status >= 500:
+        raise WebsiteServerError
+    raise WebsiteHttpError
 
 
 def _format_target(target: object) -> str:
@@ -463,7 +505,7 @@ async def scan_website(url: str) -> ScanResponse:
                         blocked_destinations.append(request_url)
                         await route.abort("blockedbyclient")
                         return
-                    except WebsiteUnreachable:
+                    except (WebsiteNotFound, WebsiteUnreachable):
                         blocked_destinations.append(request_url)
                         await route.abort("blockedbyclient")
                         return
@@ -471,11 +513,16 @@ async def scan_website(url: str) -> ScanResponse:
 
                 await context.route("**/*", guard_request)
                 page = await context.new_page()
-                await page.goto(url, wait_until="load", timeout=SCAN_TIMEOUT_MS)
+                response = await page.goto(
+                    url,
+                    wait_until="load",
+                    timeout=SCAN_TIMEOUT_MS,
+                )
                 if blocked_destinations:
                     raise InvalidScanTarget(
                         "The website attempted to access a non-public network address"
                     )
+                _validate_navigation_response(response)
                 result = await _run_axe(page)
                 scan = parse_axe_results(
                     url=url,
@@ -486,7 +533,14 @@ async def scan_website(url: str) -> ScanResponse:
                 return await enrich_landmark_repair_evidence(page, scan)
             finally:
                 await browser.close()
-    except (InvalidScanTarget, WebsiteUnreachable):
+    except (
+        InvalidScanTarget,
+        WebsiteNotFound,
+        WebsiteUnreachable,
+        PageNotFound,
+        WebsiteServerError,
+        WebsiteHttpError,
+    ):
         raise
     except PlaywrightTimeoutError as error:
         raise ScanTimedOut("The website took too long to load") from error

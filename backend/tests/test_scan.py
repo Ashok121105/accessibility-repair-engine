@@ -1,18 +1,28 @@
 import asyncio
+import socket
 from pathlib import Path
 
 from axe_core_python.async_playwright import Axe
 import pytest
 from fastapi.testclient import TestClient
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
-from backend.app.accessibility.models import ScanResponse
+from backend.app.accessibility.models import ScanRequest, ScanResponse
+from backend.app.accessibility import scanner
 from backend.app.accessibility.scanner import (
+    InvalidScanTarget,
+    PageNotFound,
     ScanTimedOut,
     ScannerFailure,
     ScanError,
     LANDMARK_CANDIDATE_SCRIPT,
     WebsiteUnreachable,
+    WebsiteHttpError,
+    WebsiteNotFound,
+    WebsiteServerError,
+    _ensure_public_http_url,
     _landmark_target,
     _region_repair_target,
     enrich_landmark_repair_evidence,
@@ -82,7 +92,36 @@ def test_scan_endpoint_rejects_invalid_url_without_scanning(monkeypatch) -> None
     response = client.post("/api/scan", json={"url": "javascript:alert(1)"})
 
     assert response.status_code == 422
-    assert "valid public HTTP or HTTPS URL" in response.json()["detail"][0]["msg"]
+    assert "Invalid website URL. Please check the URL." in response.json()["detail"][0]["msg"]
+
+
+@pytest.mark.parametrize(
+    ("value", "normalized"),
+    [
+        ("https://example.com", "https://example.com"),
+        ("https://example.com/", "https://example.com/"),
+        ("example.com", "https://example.com"),
+        ("example.com/path", "https://example.com/path"),
+    ],
+)
+def test_scan_request_normalizes_valid_urls(value: str, normalized: str) -> None:
+    assert ScanRequest(url=value).url == normalized
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://",
+        "https://bad..example/",
+        "https://bad host.example/",
+        "https://example.com:invalid/",
+        "https://user:password@example.com/",
+        "javascript:alert(1)",
+    ],
+)
+def test_scan_request_rejects_malformed_urls(value: str) -> None:
+    with pytest.raises(ValueError, match="Invalid website URL"):
+        ScanRequest(url=value)
 
 
 def test_scan_endpoint_resolves_website_names_through_existing_discovery(monkeypatch) -> None:
@@ -124,15 +163,19 @@ def test_scan_endpoint_rejects_private_network_targets() -> None:
     response = client.post("/api/scan", json={"url": "http://127.0.0.1"})
 
     assert response.status_code == 400
-    assert "publicly routable" in response.json()["detail"]
+    assert response.json()["detail"] == InvalidScanTarget.user_message
 
 
 @pytest.mark.parametrize(
     ("error", "status_code"),
     [
-        (WebsiteUnreachable("The website could not be reached"), 502),
-        (ScanTimedOut("The website took too long to load"), 504),
-        (ScannerFailure("The accessibility scanner failed"), 500),
+        (WebsiteNotFound(), 502),
+        (WebsiteUnreachable(), 502),
+        (ScanTimedOut(), 504),
+        (PageNotFound(), 404),
+        (WebsiteServerError(), 502),
+        (WebsiteHttpError(), 502),
+        (ScannerFailure(), 500),
     ],
 )
 def test_scan_endpoint_returns_typed_scanner_errors(
@@ -149,7 +192,282 @@ def test_scan_endpoint_returns_typed_scanner_errors(
     response = client.post("/api/scan", json={"url": "https://example.com"})
 
     assert response.status_code == status_code
-    assert response.json()["detail"] == str(error)
+    assert response.json()["detail"] == error.user_message
+
+
+def test_scan_endpoint_does_not_expose_internal_scanner_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_scan(_url: str) -> ScanResponse:
+        raise ScannerFailure("raw Playwright stack, host, and implementation details")
+
+    monkeypatch.setattr(scan_api, "scan_website", fail_scan)
+
+    response = client.post("/api/scan", json={"url": "https://example.com/"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == ScannerFailure.user_message
+    assert "Playwright" not in response.json()["detail"]
+
+
+def _public_dns_records(hostname: str, port: int, **_kwargs: object) -> list[tuple]:
+    return [
+        (
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            socket.IPPROTO_TCP,
+            "",
+            ("93.184.216.34", port),
+        )
+    ]
+
+
+@pytest.mark.anyio
+async def test_valid_public_url_passes_hostname_and_address_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", _public_dns_records)
+
+    await _ensure_public_http_url("https://example.com/")
+
+
+@pytest.mark.anyio
+async def test_dns_failure_is_distinct_from_connection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_dns(*_args: object, **_kwargs: object) -> None:
+        raise socket.gaierror(socket.EAI_NONAME, "private resolver details")
+
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", fail_dns)
+
+    with pytest.raises(WebsiteNotFound):
+        await _ensure_public_http_url("https://not-found.example/")
+
+
+@pytest.mark.anyio
+async def test_empty_dns_response_is_reported_as_hostname_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        scanner.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [],
+    )
+
+    with pytest.raises(WebsiteNotFound):
+        await _ensure_public_http_url("https://no-address.example/")
+
+
+@pytest.mark.anyio
+async def test_private_dns_answers_remain_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def mixed_dns(_hostname: str, port: int, **_kwargs: object) -> list[tuple]:
+        return _public_dns_records("example.com", port) + [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", port),
+            )
+        ]
+
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", mixed_dns)
+
+    with pytest.raises(InvalidScanTarget):
+        await _ensure_public_http_url("https://example.com/")
+
+
+class FakeNavigationResponse:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+
+class FakeScanPage:
+    def __init__(
+        self,
+        *,
+        status: int = 200,
+        navigation_error: Exception | None = None,
+    ) -> None:
+        self.status = status
+        self.navigation_error = navigation_error
+        self.url = "https://example.com/"
+
+    async def goto(self, _url: str, **_kwargs: object) -> FakeNavigationResponse:
+        if self.navigation_error:
+            raise self.navigation_error
+        return FakeNavigationResponse(self.status)
+
+    async def title(self) -> str:
+        return "Example site"
+
+
+def install_fake_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    page: FakeScanPage,
+) -> None:
+    class FakeContext:
+        async def route(self, _pattern: str, _handler: object) -> None:
+            return None
+
+        async def new_page(self) -> FakeScanPage:
+            return page
+
+    class FakeBrowser:
+        async def new_context(self) -> FakeContext:
+            return FakeContext()
+
+        async def close(self) -> None:
+            return None
+
+    class FakeChromium:
+        async def launch(self, *, headless: bool) -> FakeBrowser:
+            assert headless is True
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakePlaywrightManager:
+        async def __aenter__(self) -> FakePlaywright:
+            return FakePlaywright()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(scanner, "async_playwright", FakePlaywrightManager)
+    monkeypatch.setattr(scanner, "_run_axe", _empty_axe_result)
+
+
+async def _empty_axe_result(_page: object) -> dict[str, list[object]]:
+    return {"violations": []}
+
+
+@pytest.mark.anyio
+async def test_successful_website_scan_uses_playwright_and_axe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = FakeScanPage()
+    install_fake_browser(monkeypatch, page)
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", _public_dns_records)
+
+    async def axe_result(_page: object) -> dict[str, list[object]]:
+        return {
+            "violations": [
+                {
+                    "id": "image-alt",
+                    "impact": "serious",
+                    "tags": ["wcag2a", "wcag111"],
+                    "description": "Images must have alternative text.",
+                    "help": "Add alternative text to images.",
+                    "nodes": [
+                        {
+                            "target": ["img.hero"],
+                            "html": '<img class="hero" src="/hero.jpg">',
+                            "failureSummary": "Add an alt attribute.",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(scanner, "_run_axe", axe_result)
+    result = await scanner.scan_website("https://example.com/")
+
+    assert result.url == "https://example.com/"
+    assert result.final_url == page.url
+    assert result.page_title == "Example site"
+    assert result.total_violations == 1
+    assert result.violations[0].id == "image-alt"
+    assert result.violations[0].css_selectors == ["img.hero"]
+
+
+@pytest.mark.anyio
+async def test_multiple_public_domains_use_the_same_scan_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    visited: list[str] = []
+
+    class RecordingPage(FakeScanPage):
+        async def goto(self, url: str, **_kwargs: object) -> FakeNavigationResponse:
+            visited.append(url)
+            return FakeNavigationResponse(200)
+
+    install_fake_browser(monkeypatch, RecordingPage())
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", _public_dns_records)
+
+    for url in ("https://www.ril.com/", "https://www.microsoft.com/"):
+        await scanner.scan_website(url)
+
+    assert visited == ["https://www.ril.com/", "https://www.microsoft.com/"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (404, PageNotFound),
+        (500, WebsiteServerError),
+    ],
+)
+async def test_http_error_statuses_are_classified(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    error_type: type[ScanError],
+) -> None:
+    install_fake_browser(monkeypatch, FakeScanPage(status=status))
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", _public_dns_records)
+
+    with pytest.raises(error_type):
+        await scanner.scan_website("https://example.com/")
+
+
+@pytest.mark.anyio
+async def test_connection_failure_is_not_misreported_as_invalid_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_browser(
+        monkeypatch,
+        FakeScanPage(
+            navigation_error=PlaywrightError("net::ERR_CONNECTION_REFUSED"),
+        ),
+    )
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", _public_dns_records)
+
+    with pytest.raises(WebsiteUnreachable):
+        await scanner.scan_website("https://example.com/")
+
+
+@pytest.mark.anyio
+async def test_navigation_timeout_is_classified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_browser(
+        monkeypatch,
+        FakeScanPage(navigation_error=PlaywrightTimeoutError("raw timeout detail")),
+    )
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", _public_dns_records)
+
+    with pytest.raises(ScanTimedOut):
+        await scanner.scan_website("https://example.com/")
+
+
+@pytest.mark.anyio
+async def test_reachable_site_with_accessibility_scan_failure_is_not_a_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_browser(monkeypatch, FakeScanPage())
+
+    async def fail_axe(_page: object) -> dict[str, list[object]]:
+        raise ScannerFailure("raw axe implementation detail")
+
+    monkeypatch.setattr(scanner, "_run_axe", fail_axe)
+    monkeypatch.setattr(scanner.socket, "getaddrinfo", _public_dns_records)
+
+    with pytest.raises(ScannerFailure):
+        await scanner.scan_website("https://example.com/")
 
 
 def test_axe_timeout_is_reported_as_scan_timeout(monkeypatch) -> None:

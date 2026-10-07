@@ -128,14 +128,22 @@ export async function getCertificate(
 
 export async function scanWebsite(url: string): Promise<ScanResponse> {
   const request: ScanRequest = { url };
-  const response = await fetch(`${API_BASE_URL}/api/scan`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/scan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    });
+  } catch (error: unknown) {
+    if (error instanceof TypeError) {
+      throw new Error("Could not connect to the scan service. Please try again.");
+    }
+    throw error;
+  }
 
   if (!response.ok) {
-    let detail = `Scan failed (${response.status})`;
+    let detail: string | undefined;
     try {
       const body: unknown = await response.json();
       if (
@@ -145,29 +153,38 @@ export async function scanWebsite(url: string): Promise<ScanResponse> {
         typeof body.detail === "string"
       ) {
         detail = body.detail;
-      } else if (
-        typeof body === "object" &&
-        body !== null &&
-        "detail" in body &&
-        Array.isArray(body.detail)
-      ) {
-        const messages = body.detail.flatMap((issue: unknown) => {
-          if (
-            typeof issue === "object" &&
-            issue !== null &&
-            "msg" in issue &&
-            typeof issue.msg === "string"
-          ) {
-            return [issue.msg];
-          }
-          return [];
-        });
-        if (messages.length > 0) detail = messages.join(". ");
       }
     } catch {
-      // Keep the HTTP status message when the server does not return JSON.
+      // Map the status to a safe message when the server response is not JSON.
     }
-    throw new Error(detail);
+    const safeMessages = new Set([
+      "Invalid website URL. Please check the URL.",
+      "This website address is blocked by the public-network security policy.",
+      "Website could not be found. Please check the domain.",
+      "Website could not be reached.",
+      "Website took too long to respond.",
+      "The requested page was not found.",
+      "The website returned a server error.",
+      "The website returned an HTTP error.",
+      "The website was reachable, but accessibility scanning could not be completed.",
+    ]);
+    if (detail && safeMessages.has(detail)) throw new Error(detail);
+    if (response.status === 400 || response.status === 422) {
+      throw new Error("Invalid website URL. Please check the URL.");
+    }
+    if (response.status === 404) {
+      throw new Error("The requested page was not found.");
+    }
+    if (response.status === 504) {
+      throw new Error("Website took too long to respond.");
+    }
+    if (response.status === 502) {
+      throw new Error("Website could not be reached.");
+    }
+    if (response.status >= 500) {
+      throw new Error("The website was reachable, but accessibility scanning could not be completed.");
+    }
+    throw new Error("The website returned an HTTP error.");
   }
 
   return (await response.json()) as ScanResponse;

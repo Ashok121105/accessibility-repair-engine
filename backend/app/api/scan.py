@@ -23,4 +23,7 @@ async def scan(request: ScanRequest) -> ScanResponse:
         save_scan(result)
         return result
     except ScanError as error:
-        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.user_message,
+        ) from error

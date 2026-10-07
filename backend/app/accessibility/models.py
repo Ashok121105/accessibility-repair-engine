@@ -1,6 +1,31 @@
 from datetime import datetime, timezone
+import ipaddress
+import re
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
+
+
+def _is_valid_public_hostname(hostname: str) -> bool:
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        try:
+            ascii_hostname = hostname.rstrip(".").encode("idna").decode("ascii")
+        except UnicodeError:
+            return False
+        if (
+            len(ascii_hostname) > 253
+            or "." not in ascii_hostname
+            or not re.search(r"[A-Za-z]", ascii_hostname.rsplit(".", 1)[-1])
+        ):
+            return False
+        return all(
+            0 < len(label) <= 63
+            and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+            for label in ascii_hostname.split(".")
+        )
 
 
 class ScanRequest(BaseModel):
@@ -9,31 +34,52 @@ class ScanRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_http_url(cls, value: str) -> str:
-        from urllib.parse import urlsplit
+        value = value.strip()
+        if not value or any(ord(character) < 32 for character in value):
+            raise ValueError("Invalid website URL. Please check the URL.")
 
-        if value != value.strip() or any(ord(character) < 32 for character in value):
-            raise ValueError("Website input must not contain surrounding whitespace or control characters")
+        explicit_http_scheme = value.lower().startswith(("http://", "https://"))
+        if not explicit_http_scheme and "://" not in value:
+            try:
+                candidate = urlsplit(f"//{value}")
+                candidate_hostname = candidate.hostname
+                candidate.port
+            except ValueError:
+                candidate_hostname = None
+            if candidate_hostname and _is_valid_public_hostname(candidate_hostname):
+                value = f"https://{value}"
 
         try:
             parsed = urlsplit(value)
-            hostname = parsed.hostname
-            parsed.port
         except ValueError as error:
-            raise ValueError("Enter a valid public HTTP or HTTPS URL") from error
+            raise ValueError("Invalid website URL. Please check the URL.") from error
 
         if parsed.scheme:
             if (
                 parsed.scheme.lower() not in {"http", "https"}
                 or not parsed.netloc
+            ):
+                raise ValueError("Invalid website URL. Please check the URL.")
+
+        try:
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError as error:
+            raise ValueError("Invalid website URL. Please check the URL.") from error
+
+        if parsed.scheme:
+            if (
+                not parsed.netloc
                 or hostname is None
                 or parsed.username is not None
                 or parsed.password is not None
+                or not _is_valid_public_hostname(hostname)
             ):
-                raise ValueError("Enter a valid public HTTP or HTTPS URL")
+                raise ValueError("Invalid website URL. Please check the URL.")
             return value
 
         if any(character in value for character in "/?#@"):
-            raise ValueError("Enter a website name, domain, or valid public HTTP or HTTPS URL")
+            raise ValueError("Invalid website URL. Please check the URL.")
 
         return value
 
