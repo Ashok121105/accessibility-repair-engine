@@ -17,7 +17,13 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
     async_playwright,
 )
-
+from backend.app.accessibility.scanner import (
+    InvalidScanTarget,
+    ScanError,
+    WebsiteNotFound,
+    WebsiteUnreachable,
+    _ensure_public_http_url,
+)
 from backend.app.agent.intents import UNSUPPORTED_MESSAGE, parse_command
 from backend.app.agent.page_inspector import inspect_page, summarize_page
 from backend.app.services.website_discovery import discover_website
@@ -375,30 +381,37 @@ class AgentSessionManager:
             )
             normalized_command = command
             if input_language != "en":
-                try:
-                    normalized_command = await translate_command_to_english(
-                        command,
-                        input_language,
-                        api_key=get_settings().gemini_api_key,
-                    )
-                except TranslationUnavailable:
-                    session.language.active_language = "en"
-                    session.language.language_source = "fallback"
-                    message = TRANSLATION_UNAVAILABLE
-                    self._clear_unvisited_page(session)
-                    return self._command_response(
-                        session,
-                        success=False,
-                        action="translation_unavailable",
-                        message=message,
-                        details=self._language_details(
+                local_intent = parse_command(command)
+                if local_intent.action == "open_website" and local_intent.query:
+                    normalized_command = f"Open {local_intent.query}"
+                    if not session.language.manually_locked:
+                        target_language = "en"
+                        response_source = "fallback"
+                else:
+                    try:
+                        normalized_command = await translate_command_to_english(
+                            command,
+                            input_language,
+                            api_key=get_settings().gemini_api_key,
+                        )
+                    except TranslationUnavailable:
+                        session.language.active_language = "en"
+                        session.language.language_source = "fallback"
+                        message = TRANSLATION_UNAVAILABLE
+                        self._clear_unvisited_page(session)
+                        return self._command_response(
                             session,
-                            language_detection.language,
-                            None,
-                            include_metadata=include_language_metadata,
-                            translation_error=True,
-                        ),
-                    )
+                            success=False,
+                            action="translation_unavailable",
+                            message=message,
+                            details=self._language_details(
+                                session,
+                                language_detection.language,
+                                None,
+                                include_metadata=include_language_metadata,
+                                translation_error=True,
+                            ),
+                        )
 
             intent = parse_command(normalized_command)
             if intent.action == "unsupported":
@@ -427,6 +440,24 @@ class AgentSessionManager:
             try:
                 if intent.action in {"open_flipkart", "open_website", "check_website_accessibility", "scan_website", "discover_website"}:
                     result = await self._handle_website_intent(session, intent)
+                elif intent.action == "go_back":
+                    response = await session.page.go_back(
+                        wait_until="domcontentloaded",
+                        timeout=PAGE_TIMEOUT_MS,
+                    )
+                    status = getattr(response, "status", None)
+                    if response is None or (isinstance(status, int) and status >= 400):
+                        result = {
+                            "success": False,
+                            "message": "There is no previous page to return to.",
+                            "details": {},
+                        }
+                    else:
+                        result = {
+                            "success": True,
+                            "message": "Returned to the previous page.",
+                            "details": {},
+                        }
                 elif intent.action == "inspect_page":
                     snapshot = await inspect_page(session.page)
                     result = {
@@ -547,6 +578,7 @@ class AgentSessionManager:
                     "register",
                     "authentication_status",
                     "open_flipkart",
+                    "open_website",
                     "search",
                     "select_second",
                     "select_product",
@@ -563,6 +595,7 @@ class AgentSessionManager:
                     "register",
                     "authentication_status",
                     "open_flipkart",
+                    "open_website",
                     "search",
                     "select_second",
                     "select_product",
@@ -586,6 +619,7 @@ class AgentSessionManager:
                     "register",
                     "authentication_status",
                     "open_flipkart",
+                    "open_website",
                     "search",
                     "select_second",
                     "select_product",
@@ -795,19 +829,13 @@ class AgentSessionManager:
             await self.stop_cleanup_worker()
 
     async def _guard_navigation(self, route: Route) -> None:
-        request = route.request
-        if request.is_navigation_request():
-            try:
-                frame = request.frame
-            except PlaywrightError:
-                frame = None
-            if (
-                (frame is None or frame == frame.page.main_frame)
-                and not _is_allowed_host(request.url)
-            ):
-                logger.warning("Blocked top-level navigation outside Flipkart: %s", request.url)
-                await route.abort()
-                return
+        request_url = route.request.url
+        try:
+            await _ensure_public_http_url(request_url)
+        except ScanError as error:
+            logger.warning("Blocked browser request outside the public HTTP(S) policy: %s", error)
+            await route.abort()
+            return
         await route.continue_()
 
     @staticmethod
@@ -820,7 +848,7 @@ class AgentSessionManager:
         title = (await page.title()).casefold()
         if _TRANSACTIONAL_PATH.search(parsed.path) and not allow_authentication:
             return (
-                "Flipkart requires login or has blocked this browser session. "
+                "The website requires login or has blocked this browser session. "
                 "The agent stopped; do not share passwords, OTPs, or other secrets."
             )
         body = ""
@@ -830,7 +858,7 @@ class AgentSessionManager:
         blocking_markers = _BLOCK_MARKERS + (_AUTH_TEXT_MARKERS if check_auth_text else ())
         if any(marker in title or marker in body for marker in blocking_markers):
             return (
-                "Flipkart presented a CAPTCHA, login requirement, or bot-protection page. "
+                "The website presented a CAPTCHA, login requirement, or bot-protection page. "
                 "The agent stopped without attempting to bypass it."
             )
         return None
@@ -1075,6 +1103,17 @@ class AgentSessionManager:
         }
 
     async def _shopping_search(self, session: AgentSession, raw_query: str) -> dict[str, object]:
+        if not _is_allowed_host(session.page.url):
+            search_request = normalize_shopping_query(raw_query)
+            search_result = await self._search(session.page, search_request.query)
+            return {
+                **search_result,
+                "message": f"Search submitted for {search_request.query}.",
+                "details": {
+                    **search_result["details"],
+                    "filters": search_request.as_dict(),
+                },
+            }
         blocked = await self._shopping_access(session)
         if blocked:
             return blocked
@@ -1498,7 +1537,7 @@ class AgentSessionManager:
                 break
         if search_box is None:
             logger.warning("No visible search control was found on %s", page.url)
-            raise AgentError("Could not find a usable search box on the current Flipkart page.", 422)
+            raise AgentError("Could not find a usable search box on the current website.", 422)
 
         await search_box.fill(query)
         await search_box.press("Enter")
@@ -1511,7 +1550,7 @@ class AgentSessionManager:
         except PlaywrightTimeoutError:
             logger.info("No visible product link appeared after submitting the Flipkart search")
         return {
-            "message": f"Flipkart search submitted for {query}.",
+            "message": f"Search submitted for {query}.",
             "details": {"query": query},
         }
 
@@ -1592,7 +1631,56 @@ class AgentSessionManager:
             }
 
         target_url = str(info["resolved_url"])
-        await session.page.goto(target_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+        try:
+            await _ensure_public_http_url(target_url)
+            response = await session.page.goto(
+                target_url,
+                wait_until="domcontentloaded",
+                timeout=PAGE_TIMEOUT_MS,
+            )
+        except InvalidScanTarget:
+            return {
+                "success": False,
+                "message": "That website is blocked by the public-network safety policy.",
+                "details": {"website": info["display_name"], "url": target_url},
+                "website": info["display_name"],
+                "url": target_url,
+            }
+        except WebsiteNotFound:
+            return {
+                "success": False,
+                "message": "Website could not be found. Please check the domain.",
+                "details": {"website": info["display_name"], "url": target_url},
+                "website": info["display_name"],
+                "url": target_url,
+            }
+        except WebsiteUnreachable:
+            return {
+                "success": False,
+                "message": "Website could not be reached.",
+                "details": {"website": info["display_name"], "url": target_url},
+                "website": info["display_name"],
+                "url": target_url,
+            }
+        status = getattr(response, "status", None)
+        if isinstance(status, int) and status >= 400:
+            return {
+                "success": False,
+                "message": f"{info['display_name']} could not be opened (HTTP {status}).",
+                "details": {"website": info["display_name"], "url": target_url, "status": status},
+                "website": info["display_name"],
+                "url": target_url,
+            }
+        try:
+            await _ensure_public_http_url(session.page.url)
+        except ScanError:
+            return {
+                "success": False,
+                "message": "The website redirected outside the public-network safety policy.",
+                "details": {"website": info["display_name"]},
+                "website": info["display_name"],
+                "url": None,
+            }
         blocking_message = await AgentSessionManager._blocking_message(
             session.page,
             check_auth_text=False,
@@ -1607,9 +1695,9 @@ class AgentSessionManager:
                 "url": target_url,
             }
 
-        await AgentSessionManager._dismiss_ordinary_popup(session.page)
-        snapshot = await inspect_page(session.page)
+        popup_dismissed = await AgentSessionManager._dismiss_ordinary_popup(session.page)
         if action_name in {"check_website_accessibility", "scan_website"}:
+            snapshot = await inspect_page(session.page)
             return {
                 "success": True,
                 "message": f"Opened {info['display_name']} and the page is ready for accessibility inspection.",
@@ -1618,6 +1706,7 @@ class AgentSessionManager:
                     "url": target_url,
                     "authentication": snapshot["authentication"],
                     "page_snapshot": snapshot,
+                    "popup_dismissed": popup_dismissed,
                     "source": info["source"],
                     "confidence": info["confidence"],
                 },
@@ -1627,11 +1716,11 @@ class AgentSessionManager:
 
         return {
             "success": True,
-            "message": f"Opened {info['display_name']} successfully.",
+            "message": f"{info['display_name']} is open. What would you like to do next?",
             "details": {
                 "website": info["display_name"],
                 "url": target_url,
-                "authentication": snapshot["authentication"],
+                "popup_dismissed": popup_dismissed,
                 "source": info["source"],
                 "confidence": info["confidence"],
             },

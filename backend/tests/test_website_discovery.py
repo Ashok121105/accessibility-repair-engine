@@ -6,6 +6,8 @@ from backend.app.services.website_discovery import discover_website
 @pytest.mark.parametrize(
     ("query", "expected_name", "expected_url"),
     [
+        ("AJIO", "AJIO", "https://www.ajio.com/"),
+        ("ajio.com", "AJIO", "https://www.ajio.com/"),
         ("Flipkart", "Flipkart", "https://www.flipkart.com/"),
         ("Amazon", "Amazon", "https://www.amazon.in/"),
         ("GitHub", "GitHub", "https://github.com/"),

@@ -2,6 +2,11 @@ import re
 from urllib.parse import urlsplit
 
 REGISTRY = {
+    "ajio": {
+        "name": "AJIO",
+        "url": "https://www.ajio.com/",
+        "aliases": {"ajio", "ajio.com", "www.ajio.com"},
+    },
     "flipkart": {
         "name": "Flipkart",
         "url": "https://www.flipkart.com/",

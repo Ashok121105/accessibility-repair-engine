@@ -50,6 +50,11 @@ _OPEN_WEBSITE = re.compile(
     r"^(?:please\s+)?open\s+(?:the\s+)?(?:website\s+)?(.+?)\s*[.!?]*$",
     re.IGNORECASE,
 )
+_OPEN_WEBSITE_SUFFIX = re.compile(
+    r"^(?:please\s+)?(.+?)\s+open(?:\s+(?:cheyyi|chey|cheyyandi))\s*[.!?]*$",
+    re.IGNORECASE,
+)
+_GO_BACK = re.compile(r"^(?:please\s+)?(?:go\s+back|back)\s*[.!?]*$", re.IGNORECASE)
 _CHECK_WEBSITE_ACCESSIBILITY = re.compile(
     r"^(?:please\s+)?(?:check|review)\s+(?:the\s+)?(?:accessibility(?:\s+of|\s+for)?\s+)?(.+?)\s*[.!?]*$",
     re.IGNORECASE,
@@ -221,12 +226,21 @@ def parse_command(command: str) -> AgentIntent:
         return AgentIntent(action="select_second")
 
     if _OPEN_FLIPKART.fullmatch(normalized):
-        return AgentIntent(action="open_flipkart")
+        return AgentIntent(action="open_website", query="Flipkart")
+
+    if _GO_BACK.fullmatch(normalized):
+        return AgentIntent(action="go_back")
 
     website_match = _OPEN_WEBSITE.fullmatch(normalized)
     if website_match:
         target = website_match.group(1).strip()
         if target and target.casefold() not in {"black shirts and checkout", ""}:
+            return AgentIntent(action="open_website", query=target)
+
+    website_suffix_match = _OPEN_WEBSITE_SUFFIX.fullmatch(normalized)
+    if website_suffix_match:
+        target = website_suffix_match.group(1).strip()
+        if target:
             return AgentIntent(action="open_website", query=target)
 
     accessibility_match = _CHECK_WEBSITE_ACCESSIBILITY.fullmatch(normalized) or _CHECK_WEBSITE_NAME_ACCESSIBILITY.fullmatch(normalized)

@@ -387,6 +387,45 @@ describe("AccessibilityAssistant", () => {
     expect(await screen.findByText("Flipkart is open.")).toBeInTheDocument();
   });
 
+  it("sends the spoken Open AJIO command and speaks the browser confirmation", async () => {
+    FakeSpeechRecognition.instances = [];
+    vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);
+    const synthesis = installSpeechSynthesis();
+    vi.mocked(startAgent).mockResolvedValue(startedSession);
+    vi.mocked(sendAgentCommand).mockResolvedValue({
+      success: true,
+      action: "open_website",
+      website: "AJIO",
+      url: "https://www.ajio.com/",
+      message: "AJIO is open. What would you like to do next?",
+      page_url: "https://www.ajio.com/",
+      details: {},
+      session_active: true,
+    });
+    const user = userEvent.setup();
+    render(<AccessibilityAssistant />);
+
+    await user.click(screen.getByRole("radio", { name: /Blind Mode/ }));
+    await user.click(screen.getByRole("button", { name: "Start Assistant" }));
+    await screen.findByText("session-1");
+    await user.click(screen.getByRole("button", { name: /Start Voice Input/ }));
+
+    const recognition = FakeSpeechRecognition.instances[0];
+    act(() => recognition.emitResult("Open AJIO"));
+    act(() => recognition.onend?.());
+
+    expect(sendAgentCommand).toHaveBeenCalledWith("session-1", "Open AJIO", {
+      preferred_language: "en",
+      language_locked: false,
+    });
+    expect(
+      await screen.findByText("AJIO is open. What would you like to do next?"),
+    ).toBeInTheDocument();
+    expect(synthesis.utterances[0].text).toBe(
+      "AJIO is open. What would you like to do next?",
+    );
+  });
+
   it("does not start microphone capture in Hearing Mode until explicitly requested", async () => {
     FakeSpeechRecognition.instances = [];
     vi.stubGlobal("SpeechRecognition", FakeSpeechRecognition);

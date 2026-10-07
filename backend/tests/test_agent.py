@@ -10,6 +10,7 @@ from backend.app.agent.page_inspector import inspect_page, summarize_page
 from backend.app.agent.service import AgentError, AgentSession, AgentSessionManager
 from backend.app.api import agent as agent_api
 from backend.app.core.config import Settings
+from backend.app.accessibility.scanner import InvalidScanTarget
 from backend.app.main import app
 
 client = TestClient(app)
@@ -232,6 +233,18 @@ def fake_browser_stack(monkeypatch, body: str = "") -> tuple[AgentSessionManager
         lambda: Settings(_env_file=None, app_env="development"),
     )
     return AgentSessionManager(), page, browser, playwright
+
+
+def add_active_session(manager: AgentSessionManager, page: FakePage, session_id: str) -> None:
+    context = FakeContext(page)
+    browser = FakeBrowser(context)
+    manager.sessions[session_id] = AgentSession(
+        session_id=session_id,
+        browser=browser,
+        playwright=FakePlaywright(browser),
+        context=context,
+        page=page,
+    )
 
 
 def test_start_agent_creates_a_persistent_browser_session(monkeypatch) -> None:
@@ -466,6 +479,11 @@ def test_stop_endpoint_closes_the_requested_session(monkeypatch) -> None:
 @pytest.mark.parametrize(
     ("command", "action", "query"),
     [
+        ("Open AJIO", "open_website", "AJIO"),
+        ("AJIO open cheyyi", "open_website", "AJIO"),
+        ("Open Flipkart", "open_website", "Flipkart"),
+        ("Open Amazon", "open_website", "Amazon"),
+        ("Go back", "go_back", None),
         ("Search for black shirts under ₹1000", "search", "black shirts under ₹1000"),
         ("search for black shirts under 1000", "search", "black shirts under 1000"),
         ("find black shirts below 1000 rupees", "search", "black shirts below 1000 rupees"),
@@ -1030,7 +1048,7 @@ def test_second_result_command_opens_the_second_dom_product_link() -> None:
     assert result["details"]["selected_result"] == "Second"
 
 
-def test_open_flipkart_navigates_the_existing_page_and_closes_only_safe_popup() -> None:
+def test_open_flipkart_navigates_the_existing_page_and_closes_only_safe_popup(monkeypatch) -> None:
     class FakeCloseButton:
         def __init__(self, page: "FakeOpenPage") -> None:
             self.page = page
@@ -1071,15 +1089,13 @@ def test_open_flipkart_navigates_the_existing_page_and_closes_only_safe_popup() 
 
     manager = AgentSessionManager()
     page = FakeOpenPage()
-    context = FakeContext(page)
     session_id = "open-flipkart-session"
-    manager.sessions[session_id] = AgentSession(
-        session_id=session_id,
-        browser=FakeBrowser(context),
-        playwright=FakePlaywright(FakeBrowser(context)),
-        context=context,
-        page=page,
-    )
+    add_active_session(manager, page, session_id)
+
+    async def allow_public_url(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr(agent_service, "_ensure_public_http_url", allow_public_url)
 
     result = asyncio.run(manager.command(session_id, "Open Flipkart"))
 
@@ -1087,14 +1103,14 @@ def test_open_flipkart_navigates_the_existing_page_and_closes_only_safe_popup() 
     assert result["action"] == "open_website"
     assert result["website"] == "Flipkart"
     assert result["url"] == "https://www.flipkart.com/"
-    assert result["message"] == "Flipkart is open. A dismissible popup was closed."
-    assert result["details"]["authentication"] == {"status": "UNKNOWN", "website": "flipkart"}
+    assert result["message"] == "Flipkart is open. What would you like to do next?"
+    assert result["details"]["popup_dismissed"] is True
     assert page.goto_calls == ["https://www.flipkart.com/"]
     assert page.close_button.clicked is True
     assert page.selectors == ['button[aria-label="Close" i]']
 
 
-def test_open_flipkart_does_not_click_arbitrary_login_or_submit_controls() -> None:
+def test_open_flipkart_does_not_click_arbitrary_login_or_submit_controls(monkeypatch) -> None:
     class NoMatchingCloseControls:
         async def count(self) -> int:
             return 0
@@ -1112,26 +1128,161 @@ def test_open_flipkart_does_not_click_arbitrary_login_or_submit_controls() -> No
 
     manager = AgentSessionManager()
     page = FakeOpenPage()
-    context = FakeContext(page)
     session_id = "safe-popup-session"
-    manager.sessions[session_id] = AgentSession(
-        session_id=session_id,
-        browser=FakeBrowser(context),
-        playwright=FakePlaywright(FakeBrowser(context)),
-        context=context,
-        page=page,
-    )
+    add_active_session(manager, page, session_id)
+
+    async def allow_public_url(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr(agent_service, "_ensure_public_http_url", allow_public_url)
 
     result = asyncio.run(manager.command(session_id, "Open Flipkart"))
 
     assert result["success"] is True
-    assert result["message"] == "Flipkart is open."
-    assert result["details"]["popup_dismissed"] is False
+    assert result["message"] == "Flipkart is open. What would you like to do next?"
     assert [selector for selector in page.selectors if selector != "body"] == [
         'button[aria-label="Close" i]',
         '[role="button"][aria-label="Close" i]',
         'button[title="Close" i]',
     ]
+
+
+@pytest.mark.parametrize(
+    ("command", "website", "url"),
+    [
+        ("Open AJIO", "AJIO", "https://www.ajio.com/"),
+        ("AJIO open cheyyi", "AJIO", "https://www.ajio.com/"),
+        ("Open Flipkart", "Flipkart", "https://www.flipkart.com/"),
+        ("Open Amazon", "Amazon", "https://www.amazon.in/"),
+    ],
+)
+def test_open_website_command_navigates_and_confirms_after_mock_navigation(
+    monkeypatch,
+    command: str,
+    website: str,
+    url: str,
+) -> None:
+    class FakeWebsitePage(FakePage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.url = "https://www.flipkart.com/"
+            self.goto_calls: list[str] = []
+
+        async def goto(self, target: str, **_kwargs: object) -> SimpleNamespace:
+            self.goto_calls.append(target)
+            self.url = target
+            return SimpleNamespace(status=200)
+
+    checked_urls: list[str] = []
+
+    async def allow_public_url(target: str) -> None:
+        checked_urls.append(target)
+
+    monkeypatch.setattr(agent_service, "_ensure_public_http_url", allow_public_url)
+    manager = AgentSessionManager()
+    page = FakeWebsitePage()
+    add_active_session(manager, page, "open-website-session")
+
+    result = asyncio.run(manager.command("open-website-session", command))
+
+    assert result["success"] is True
+    assert result["action"] == "open_website"
+    assert result["website"] == website
+    assert result["url"] == url
+    assert result["message"] == f"{website} is open. What would you like to do next?"
+    assert page.goto_calls == [url]
+    assert checked_urls == [url, url]
+
+
+def test_open_website_navigation_failure_does_not_claim_success(monkeypatch) -> None:
+    class FailingWebsitePage(FakePage):
+        url = "https://www.flipkart.com/"
+
+        async def goto(self, _target: str, **_kwargs: object) -> None:
+            raise agent_service.PlaywrightError("mock network failure")
+
+    async def allow_public_url(_target: str) -> None:
+        return None
+
+    monkeypatch.setattr(agent_service, "_ensure_public_http_url", allow_public_url)
+    manager = AgentSessionManager()
+    add_active_session(manager, FailingWebsitePage(), "failed-open-session")
+
+    result = asyncio.run(manager.command("failed-open-session", "Open AJIO"))
+
+    assert result["success"] is False
+    assert "could not complete" in str(result["message"]).lower()
+    assert "is open" not in str(result["message"]).lower()
+
+
+def test_open_website_http_failure_does_not_claim_success(monkeypatch) -> None:
+    class FailedResponsePage(FakePage):
+        url = "https://www.flipkart.com/"
+
+        async def goto(self, target: str, **_kwargs: object) -> SimpleNamespace:
+            self.url = target
+            return SimpleNamespace(status=403)
+
+    async def allow_public_url(_target: str) -> None:
+        return None
+
+    monkeypatch.setattr(agent_service, "_ensure_public_http_url", allow_public_url)
+    manager = AgentSessionManager()
+    add_active_session(manager, FailedResponsePage(), "http-failure-session")
+
+    result = asyncio.run(manager.command("http-failure-session", "Open AJIO"))
+
+    assert result["success"] is False
+    assert "HTTP 403" in str(result["message"])
+    assert "is open" not in str(result["message"]).lower()
+
+
+def test_navigation_guard_blocks_private_destinations(monkeypatch) -> None:
+    class FakeRouteRequest:
+        url = "http://127.0.0.1/"
+
+    class FakeRoute:
+        request = FakeRouteRequest()
+        aborted = False
+        continued = False
+
+        async def abort(self) -> None:
+            self.aborted = True
+
+        async def continue_(self) -> None:
+            self.continued = True
+
+    async def reject_private_url(_target: str) -> None:
+        raise InvalidScanTarget("private address")
+
+    monkeypatch.setattr(agent_service, "_ensure_public_http_url", reject_private_url)
+    route = FakeRoute()
+
+    asyncio.run(AgentSessionManager._guard_navigation(AgentSessionManager(), route))
+
+    assert route.aborted is True
+    assert route.continued is False
+
+
+def test_open_website_command_rejects_and_does_not_repeat_credentials() -> None:
+    class FakeWebsitePage(FakePage):
+        url = "https://www.flipkart.com/"
+
+    manager = AgentSessionManager()
+    page = FakeWebsitePage()
+    page.url = "https://www.flipkart.com/"
+    add_active_session(manager, page, "sensitive-open-session")
+
+    result = asyncio.run(
+        manager.command(
+            "sensitive-open-session",
+            "Open AJIO my password is demo-secret-123",
+        )
+    )
+
+    assert result["success"] is False
+    assert "demo-secret-123" not in str(result)
+    assert page.url == ""
 
 
 def test_shutdown_closes_all_active_browser_sessions(monkeypatch) -> None:
@@ -1212,10 +1363,15 @@ def test_blocking_page_stops_and_cleans_up_browser_session(monkeypatch) -> None:
     assert playwright.stopped
 
 
-def test_navigation_guard_blocks_top_level_cross_domain_navigation(monkeypatch) -> None:
+def test_navigation_guard_allows_public_cross_domain_navigation(monkeypatch) -> None:
     manager, _page, _browser, _playwright = fake_browser_stack(monkeypatch)
     asyncio.run(manager.start("https://www.flipkart.com/"))
     route_handler = next(iter(manager.sessions.values())).context.route_handler
+    monkeypatch.setattr(
+        agent_service,
+        "_ensure_public_http_url",
+        lambda _url: asyncio.sleep(0),
+    )
 
     class FakeRoute:
         def __init__(self) -> None:
@@ -1239,5 +1395,5 @@ def test_navigation_guard_blocks_top_level_cross_domain_navigation(monkeypatch) 
     route = FakeRoute()
     asyncio.run(route_handler(route))
 
-    assert route.aborted
-    assert not route.continued
+    assert not route.aborted
+    assert route.continued

@@ -938,7 +938,7 @@ export default function AccessibilityAssistant() {
             </button>
           </div>
           <p id="assistant-agent-url-help" className="assistant-help">
-            Use the HTTPS Flipkart URL to start this assistant session. Use Website Scan for other site names and URLs.
+            Start the controlled browser on Flipkart, then use voice or text commands such as “Open AJIO” to navigate to public websites.
           </p>
         </form>
         {agentSessionId && (
