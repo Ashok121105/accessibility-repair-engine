@@ -1,5 +1,7 @@
 import asyncio
+from pathlib import Path
 
+from axe_core_python.async_playwright import Axe
 import pytest
 from fastapi.testclient import TestClient
 from playwright.async_api import async_playwright
@@ -387,3 +389,40 @@ async def test_landmark_page_evidence_is_sanitized_without_changing_target_conte
             assert "script" not in target[2]
         finally:
             await browser.close()
+
+
+@pytest.mark.anyio
+async def test_static_article_fixture_produces_deterministic_landmark_target() -> None:
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "sample-sites"
+        / "landmark-repair"
+        / "index.html"
+    )
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(fixture.read_text(encoding="utf-8"))
+            result = await Axe().run(page)
+            scan = parse_axe_results(
+                url="https://project-fixture.invalid/1",
+                final_url="https://project-fixture.invalid/1",
+                page_title=await page.title(),
+                result=result,
+            )
+            enriched = await enrich_landmark_repair_evidence(page, scan)
+        finally:
+            await browser.close()
+
+    landmark = next(
+        violation
+        for violation in enriched.violations
+        if violation.rule_id == "landmark-one-main"
+    )
+    target_node = landmark.affected_nodes[0]
+    assert target_node.html.startswith("<html")
+    assert target_node.repair_target_selector == "article"
+    assert target_node.repair_target_html is not None
+    assert target_node.repair_target_html.startswith("<article>")
+    assert target_node.repair_context_html is not None

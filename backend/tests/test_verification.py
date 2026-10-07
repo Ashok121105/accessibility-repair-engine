@@ -295,6 +295,81 @@ async def test_landmark_one_main_rejects_ambiguous_context_before_scanning(
 
 
 @pytest.mark.anyio
+async def test_landmark_one_main_verifies_unique_semantic_article() -> None:
+    original_html = (
+        "<article><h1>Community Accessibility Update</h1>"
+        "<p>This existing article contains the primary content and can be placed "
+        "inside a main landmark without inventing or changing its content.</p>"
+        "</article>"
+    )
+    proposed_html = f"<main>{original_html}</main>"
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="landmark-one-main",
+        selector="article",
+        context_html=original_html,
+        wcag_criterion="1.3.1 Info and Relationships",
+        repair_proposal=RepairProposal(
+            repair_type="landmark_addition",
+            explanation="Place the existing article in the main landmark.",
+            original_html=original_html,
+            proposed_html=proposed_html,
+            confidence=0.9,
+            reasoning_summary="The unique article is preserved unchanged.",
+        ),
+    )
+
+    result = await sandbox.verify_repair(request)
+
+    assert result.status == "verified", result.model_dump()
+    assert result.original_violation_present is True
+    assert result.repaired_violation_present is False
+    assert result.new_violations == []
+    assert result.scope_safe is True
+    assert all(check.passed for check in result.checks)
+
+
+@pytest.mark.anyio
+async def test_landmark_one_main_rejects_multiple_semantic_articles() -> None:
+    original_html = (
+        "<article><h1>First article</h1>"
+        "<p>This existing article has enough substantive content to qualify.</p>"
+        "</article>"
+    )
+    proposed_html = f"<main>{original_html}</main>"
+    other_article = (
+        "<article><h2>Second article</h2>"
+        "<p>This other existing article also has enough substantive content.</p>"
+        "</article>"
+    )
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="landmark-one-main",
+        selector="article",
+        context_html=original_html + other_article,
+        repair_proposal=RepairProposal(
+            repair_type="landmark_addition",
+            explanation="Wrap the identified article.",
+            original_html=original_html,
+            proposed_html=proposed_html,
+            confidence=0.9,
+            reasoning_summary="The content is unchanged.",
+        ),
+    )
+
+    result = await sandbox.verify_repair(request)
+
+    assert result.status == "rejected"
+    assert result.scope_safe is False
+    assert any(
+        check.name == "selector_and_context" and not check.passed
+        for check in result.checks
+    )
+
+
+@pytest.mark.anyio
 async def test_region_repair_can_add_main_around_unchanged_content() -> None:
     original_html = '<p lang="en">Existing page content.</p>'
     proposed_html = f"<main>{original_html}</main>"

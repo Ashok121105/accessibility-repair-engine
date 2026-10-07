@@ -361,19 +361,26 @@ async def _run_landmark_pair(
                     ...(target.id ? [target.id] : []),
                     ...target.classList,
                   ].filter((value) => signal.test(value.replace(/[-_]/g, "")));
+                  const targetIsSemanticArticle =
+                    target.tagName.toLowerCase() === "article" &&
+                    identities.length === 0 &&
+                    selector === "article";
                   const candidates = [...root.querySelectorAll("div,section,article")].filter((element) => {
                     const tokens = [
                       ...(element.id ? [element.id] : []),
                       ...element.classList,
                     ].filter((value) => signal.test(value.replace(/[-_]/g, "")));
+                    const isSemanticArticle =
+                      element.tagName.toLowerCase() === "article" &&
+                      tokens.length === 0;
                     const textLength = (element.textContent || "").trim().replace(/\\s+/g, " ").length;
-                    return tokens.length === 1 &&
+                    return (tokens.length === 1 || isSemanticArticle) &&
                       element.querySelector("h1,h2,h3,h4,h5,h6") &&
                       textLength >= 30;
                   });
                   return {
                     safe: ["div", "section", "article"].includes(target.tagName.toLowerCase()) &&
-                      identities.length === 1 &&
+                      (identities.length === 1 || targetIsSemanticArticle) &&
                       target.querySelector("h1,h2,h3,h4,h5,h6") !== null &&
                       (target.textContent || "").trim().replace(/\\s+/g, " ").length >= 30 &&
                       target.outerHTML === originalHtml &&

@@ -128,7 +128,9 @@ def _has_deterministic_landmark_target(request: RepairProposalRequest) -> bool:
         for value in identity_values
         if LANDMARK_CONTAINER_SIGNAL.fullmatch(value.replace("-", "").replace("_", ""))
     ]
-    if len(signal_values) != 1:
+    if len(signal_values) != 1 and not (
+        parser.root_tag == "article" and not signal_values
+    ):
         return False
 
     matching_candidates: list[dict[str, Any]] = []
@@ -143,9 +145,13 @@ def _has_deterministic_landmark_target(request: RepairProposalRequest) -> bool:
                     value.replace("-", "").replace("_", "")
                 )
             ]
+            is_semantic_article = (
+                node["tag"] == "article"
+                and not signals
+            )
             if (
                 node["tag"] in {"div", "section", "article"}
-                and len(signals) == 1
+                and (len(signals) == 1 or is_semantic_article)
                 and any(
                     re.fullmatch(r"h[1-6]", descendant["tag"])
                     for descendant in _landmark_descendants(node)
@@ -166,6 +172,17 @@ def _has_deterministic_landmark_target(request: RepairProposalRequest) -> bool:
             parser.root_attrs.get("id") == selected_id
             and sum(
                 node["attrs"].get("id") == selected_id
+                for root in context_parser.roots
+                for node in _landmark_descendants(root)
+            )
+            == 1
+        )
+    if request.css_selector == "article":
+        return (
+            parser.root_tag == "article"
+            and not signal_values
+            and sum(
+                node["tag"] == "article"
                 for root in context_parser.roots
                 for node in _landmark_descendants(root)
             )
@@ -224,8 +241,9 @@ def _build_prompt(request: RepairProposalRequest) -> str:
     landmark_instructions = (
         " For landmark-one-main, use only the explicitly identified existing content "
         "container in the supplied page structure. If it is not uniquely identified "
-        "by a content-related id/class and does not contain a heading and meaningful "
-        "text, decline with repair_not_safe. When safe, set proposed_html to exactly "
+        "by a content-related id/class, or is the one semantic article container, "
+        "and does not contain a heading and meaningful text, decline with "
+        "repair_not_safe. When safe, set proposed_html to exactly "
         '"<main>" + affected_html + "</main>" and preserve all original content. '
         'Never return placeholder text such as "Content", a full page, or an invented '
         "insertion point."

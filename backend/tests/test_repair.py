@@ -276,6 +276,24 @@ def landmark_request() -> RepairProposalRequest:
     )
 
 
+def semantic_article_landmark_request() -> RepairProposalRequest:
+    target = (
+        "<article><h1>Community Accessibility Update</h1>"
+        "<p>This existing article contains the primary content and can be placed "
+        "inside a main landmark without inventing or changing its content.</p>"
+        "</article>"
+    )
+    return RepairProposalRequest(
+        violation_rule_id="landmark-one-main",
+        wcag_criterion="1.3.1 Info and Relationships",
+        violation_description="The page does not have a main landmark.",
+        affected_html=target,
+        css_selector="article",
+        context_html=target,
+        page_url="https://example.com",
+    )
+
+
 @pytest.mark.anyio
 async def test_landmark_proposal_wraps_only_evidenced_existing_target(
     monkeypatch: pytest.MonkeyPatch,
@@ -359,3 +377,30 @@ async def test_landmark_proposal_rejects_invented_content(
 
     assert proposal.repair_type == "repair_not_safe"
     assert proposal.proposed_html == ""
+
+
+@pytest.mark.anyio
+async def test_landmark_proposal_accepts_one_semantic_article_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_data = semantic_article_landmark_request()
+    mock_gemini(
+        monkeypatch,
+        gemini_text_response(
+            json.dumps(
+                {
+                    "repair_type": "landmark_addition",
+                    "explanation": "Place the existing article in the main landmark.",
+                    "original_html": request_data.affected_html,
+                    "proposed_html": f"<main>{request_data.affected_html}</main>",
+                    "confidence": 0.9,
+                    "reasoning_summary": "The unique article is preserved unchanged.",
+                }
+            )
+        ),
+    )
+
+    proposal = await service.propose_repair(request_data, "test-secret")
+
+    assert proposal.repair_type == "landmark_addition"
+    assert proposal.proposed_html == f"<main>{request_data.affected_html}</main>"

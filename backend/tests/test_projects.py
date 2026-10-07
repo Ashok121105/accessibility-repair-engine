@@ -204,6 +204,38 @@ def test_valid_html_zip_runs_analysis_and_maps_exact_source_line(
     assert summary.new_issues[0].project_id == result["project_id"]
 
 
+def test_landmark_article_project_scan_exposes_verified_target_evidence() -> None:
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "sample-sites"
+        / "landmark-repair"
+        / "index.html"
+    )
+    response = client.post(
+        "/api/project/analyze",
+        files={
+            "file": (
+                "landmark-demo.zip",
+                make_zip({"index.html": fixture.read_bytes()}),
+                "application/zip",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    violation = next(
+        item
+        for item in result["pages"][0]["violations"]
+        if item["rule_id"] == "landmark-one-main"
+    )
+    target = violation["affected_elements"][0]
+    assert target["html"].startswith("<html")
+    assert target["repair_target_selector"] == "article"
+    assert target["repair_target_html"].startswith("<article>")
+    assert "<h1>Community Accessibility Update</h1>" in target["repair_context_html"]
+
+
 @pytest.mark.anyio
 async def test_project_image_alt_scan_verifies_actual_affected_fragment() -> None:
     from backend.app.repair.models import RepairProposal

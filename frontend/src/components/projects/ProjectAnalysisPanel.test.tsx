@@ -85,6 +85,7 @@ function uploadResponse(onWorkflowUpdate = vi.fn()) {
         "link-name",
         "label",
         "region",
+        "landmark-one-main",
       ]}
       verificationSupportError=""
       onWorkflowUpdate={onWorkflowUpdate}
@@ -236,6 +237,107 @@ describe("developer project analysis", () => {
     });
   });
 
+  it("proposes and verifies a landmark repair using the scanned article evidence", async () => {
+    const user = userEvent.setup();
+    const targetHtml =
+      "<article><h1>Community Accessibility Update</h1><p>This existing article contains the primary content and can be placed inside a main landmark without inventing or changing its content.</p></article>";
+    const contextHtml = targetHtml;
+    const landmarkProject: ProjectAnalysisResponse = {
+      ...projectResult,
+      pages: [{
+        ...projectResult.pages[0],
+        violations: [{
+          ...projectResult.pages[0].violations[0],
+          rule_id: "landmark-one-main",
+          impact: "moderate",
+          wcag_criterion: "1.3.1 Info and Relationships",
+          description: "The page does not have a main landmark.",
+          affected_elements: [{
+            selector: "html",
+            html: "<html lang=\"en\">",
+            source_file: "index.html",
+            source_line: 1,
+            source_mapping_message: "Mapped to uploaded source.",
+            repair_target_html: targetHtml,
+            repair_target_selector: "article",
+            repair_context_html: contextHtml,
+          }],
+        }],
+      }],
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/project/analyze")) {
+        return Promise.resolve({ ok: true, json: async () => landmarkProject });
+      }
+      if (url.endsWith("/api/repair/propose")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            repair_type: "landmark_addition",
+            explanation: "Wrap the existing article in main.",
+            original_html: targetHtml,
+            proposed_html: `<main>${targetHtml}</main>`,
+            confidence: 0.9,
+            reasoning_summary: "The existing article is preserved unchanged.",
+          }),
+        });
+      }
+      if (url.endsWith("/api/repair/verify")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            verification_id: "landmark-article-verification",
+            status: "verified",
+            rule_id: "landmark-one-main",
+            original_violation_present: true,
+            repaired_violation_present: false,
+            new_violations: [],
+            scope_safe: true,
+            message: "Configured checks passed in the isolated context.",
+            checks: [{ name: "repair_resolves_violation", passed: true, message: "Resolved." }],
+          }),
+        });
+      }
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    uploadResponse();
+
+    await user.upload(
+      screen.getByLabelText("Upload developer project ZIP"),
+      new File(["archive"], "landmark-demo.zip", { type: "application/zip" }),
+    );
+    await screen.findByText("completed");
+    await user.click(screen.getByRole("button", { name: "Violations" }));
+    await user.click(screen.getByRole("button", { name: "Propose Repair" }));
+    await user.click(screen.getByRole("button", { name: "Repair Proposals" }));
+    await screen.findByText("AI proposal · not verified");
+
+    const proposalCall = fetchMock.mock.calls.find(([input]) => (
+      String(input).endsWith("/api/repair/propose")
+    ));
+    expect(JSON.parse(String(proposalCall?.[1]?.body))).toMatchObject({
+      violation_rule_id: "landmark-one-main",
+      affected_html: targetHtml,
+      css_selector: "article",
+      context_html: contextHtml,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Verification" }));
+    await user.click(screen.getByRole("button", { name: "Verify Repair" }));
+    expect(await screen.findByText("VERIFIED · ISOLATED SCOPE")).toBeInTheDocument();
+    const verifyCall = fetchMock.mock.calls.find(([input]) => (
+      String(input).endsWith("/api/repair/verify")
+    ));
+    expect(JSON.parse(String(verifyCall?.[1]?.body))).toMatchObject({
+      rule_id: "landmark-one-main",
+      original_html: targetHtml,
+      selector: "article",
+      context_html: contextHtml,
+    });
+  });
+
   it("blocks verification, apply, and certificates for unsupported project rules", async () => {
     const user = userEvent.setup();
     const unsupportedProject: ProjectAnalysisResponse = {
@@ -244,7 +346,7 @@ describe("developer project analysis", () => {
         ...page,
         violations: page.violations.map((violation) => ({
           ...violation,
-          rule_id: "landmark-one-main",
+          rule_id: "heading-order",
         })),
       })),
     };

@@ -56,14 +56,21 @@ LANDMARK_CANDIDATE_SCRIPT = """() => {
     const hasHeading = Boolean(element.querySelector("h1,h2,h3,h4,h5,h6"));
     const textLength = (element.innerText || element.textContent || "").trim().replace(/\\s+/g, " ").length;
     const cleanTarget = sanitize(element);
+    const identityMatches = identity.filter((token) => signalPattern.test(token.replace(/[-_]/g, ""))).length;
     const idSelector = /^[A-Za-z][A-Za-z0-9_-]*$/.test(element.id) ? `#${element.id}` : "";
     const classSelector = [...element.classList]
       .filter((name) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(name) && signalPattern.test(name.replace(/[-_]/g, "")))
       .map((name) => `${element.tagName.toLowerCase()}.${name}`)
       .find((selector) => document.querySelectorAll(selector).length === 1) || "";
-    const selector = idSelector && document.querySelectorAll(idSelector).length === 1
-      ? idSelector
-      : classSelector;
+    const semanticArticleSelector =
+      element.tagName.toLowerCase() === "article" &&
+      identityMatches === 0 &&
+      document.querySelectorAll("article").length === 1;
+    const selector = semanticArticleSelector
+      ? "article"
+      : idSelector && document.querySelectorAll(idSelector).length === 1
+        ? idSelector
+        : classSelector;
     return {
       tag: element.tagName.toLowerCase(),
       id: element.id,
@@ -73,7 +80,7 @@ LANDMARK_CANDIDATE_SCRIPT = """() => {
       unchanged: cleanTarget.outerHTML === element.outerHTML,
       hasHeading,
       textLength,
-      identityMatches: identity.filter((token) => signalPattern.test(token.replace(/[-_]/g, ""))).length,
+      identityMatches,
     };
   });
   return {
@@ -178,7 +185,14 @@ def _landmark_target(
         for candidate in candidates
         if isinstance(candidate, dict)
         and candidate.get("tag") in {"div", "section", "article"}
-        and candidate.get("identityMatches") == 1
+        and (
+            candidate.get("identityMatches") == 1
+            or (
+                candidate.get("tag") == "article"
+                and candidate.get("identityMatches") == 0
+                and candidate.get("selector") == "article"
+            )
+        )
         and candidate.get("hasHeading") is True
         and candidate.get("unchanged") is True
         and isinstance(candidate.get("textLength"), int)
@@ -194,7 +208,7 @@ def _landmark_target(
     candidate = qualifying[0]
     selector = candidate["selector"]
     if not re.fullmatch(
-        r"(?:#[A-Za-z][A-Za-z0-9_-]*|(?:div|section|article)\.[A-Za-z][A-Za-z0-9_-]*)",
+        r"(?:#[A-Za-z][A-Za-z0-9_-]*|(?:div|section|article)\.[A-Za-z][A-Za-z0-9_-]*|article)",
         selector,
     ):
         return None
