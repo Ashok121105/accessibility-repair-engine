@@ -114,6 +114,11 @@ def _has_deterministic_landmark_target(request: RepairProposalRequest) -> bool:
         or len(parser.roots) != 1
         or context_parser.error
         or context_parser.stack
+        or any(
+            node["tag"] == "main"
+            for root in context_parser.roots
+            for node in _landmark_descendants(root)
+        )
         or parser.root_tag not in {"div", "section", "article"}
         or not parser.has_heading
     ):
@@ -343,6 +348,36 @@ async def propose_repair(
     request: RepairProposalRequest,
     api_key: str | None,
 ) -> RepairProposal:
+    if request.violation_rule_id == "region":
+        if not _has_deterministic_landmark_target(request):
+            return RepairProposal(
+                repair_type="repair_not_safe",
+                explanation=(
+                    "The scan did not identify one existing meaningful content "
+                    "container that safely covers the unlandmarked content."
+                ),
+                original_html=request.affected_html,
+                proposed_html="",
+                confidence=0,
+                reasoning_summary=(
+                    "The page context did not prove one unique, unchanged content "
+                    "container with no existing main landmark."
+                ),
+            )
+        return RepairProposal(
+            repair_type="landmark_addition",
+            explanation=(
+                "Wrap the scanner-identified existing content container in a main "
+                "landmark without changing its content."
+            ),
+            original_html=request.affected_html,
+            proposed_html=f"<main>{request.affected_html}</main>",
+            confidence=1,
+            reasoning_summary=(
+                "The scanner selected one unique meaningful container from the "
+                "page structure; its existing content is preserved exactly."
+            ),
+        )
     if (
         request.violation_rule_id == "landmark-one-main"
         and not _has_deterministic_landmark_target(request)

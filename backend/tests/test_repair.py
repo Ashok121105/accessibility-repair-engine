@@ -399,6 +399,73 @@ def semantic_article_landmark_request() -> RepairProposalRequest:
     )
 
 
+def region_request() -> RepairProposalRequest:
+    target = (
+        '<div id="main-content"><h1>Welcome</h1>'
+        "<p>This is meaningful existing page content for visitors.</p></div>"
+    )
+    return RepairProposalRequest(
+        violation_rule_id="region",
+        wcag_criterion="1.3.1 Info and Relationships",
+        violation_description="Some page content is not contained by landmarks.",
+        affected_html=target,
+        css_selector="#main-content",
+        context_html=f"<header><h2>Site name</h2></header>{target}<footer>Footer</footer>",
+        page_url="https://example.com",
+    )
+
+
+@pytest.mark.anyio
+async def test_region_repair_is_deterministic_for_scanner_selected_container() -> None:
+    region = region_request()
+
+    proposal = await service.propose_repair(region, None)
+
+    assert proposal.repair_type == "landmark_addition"
+    assert proposal.original_html == region.affected_html
+    assert proposal.proposed_html == f"<main>{region.affected_html}</main>"
+    assert "preserved exactly" in proposal.reasoning_summary
+
+
+@pytest.mark.anyio
+async def test_region_repair_without_unique_container_declines_without_gemini(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_request = region_request()
+    ambiguous = base_request.model_copy(
+        update={
+            "context_html": (
+                base_request.context_html
+                + '<section class="content"><h2>Additional content</h2>'
+                "<p>This other meaningful content could also be the target.</p></section>"
+            )
+        }
+    )
+
+    async def unexpected_client(**kwargs: object) -> None:
+        raise AssertionError(f"Ambiguous evidence must not call Gemini: {kwargs}")
+
+    monkeypatch.setattr(service.httpx, "AsyncClient", unexpected_client)
+
+    proposal = await service.propose_repair(ambiguous, None)
+
+    assert proposal.repair_type == "repair_not_safe"
+    assert proposal.proposed_html == ""
+
+
+def test_region_proposal_endpoint_uses_verified_scanner_evidence_without_gemini() -> None:
+    response = client.post(
+        "/api/repair/propose",
+        json=region_request().model_dump(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["repair_type"] == "landmark_addition"
+    assert response.json()["proposed_html"] == (
+        f"<main>{region_request().affected_html}</main>"
+    )
+
+
 @pytest.mark.anyio
 async def test_landmark_proposal_wraps_only_evidenced_existing_target(
     monkeypatch: pytest.MonkeyPatch,
