@@ -24,7 +24,7 @@ import {
   Wifi,
   X,
 } from "lucide-react";
-import { applyVerifiedRepair, generateCertificate, getCertificate, getDashboardSummary, getHealth, getHindsightIssueHistory, getHindsightSummary, proposeRepair, scanWebsite, verifyRepair } from "./services/api";
+import { applyVerifiedRepair, generateCertificate, getCertificate, getDashboardSummary, getHealth, getHindsightIssueHistory, getHindsightSummary, getVerificationSupport, proposeRepair, scanWebsite, verifyRepair } from "./services/api";
 import type { AccessibilityCertificate, CertificateRequest, DashboardSummary, HindsightIssueHistory, HindsightOccurrence, HindsightSummary, RepairApplicationRequest, RepairApplicationResult, RepairProposal, RepairProposalRequest, ScanResponse, ScanViolation, ServiceState, VerificationRequest, VerificationResult } from "./types/api";
 import DashboardPanel from "./components/dashboard/DashboardPanel";
 import WebsiteHindsight from "./components/hindsight/WebsiteHindsight";
@@ -61,6 +61,8 @@ function App() {
   const [activePage, setActivePage] = useState<WorkspacePage>(pageFromLocation);
   const [serviceState, setServiceState] = useState<ServiceState>("checking");
   const [healthError, setHealthError] = useState("");
+  const [supportedVerificationRuleIds, setSupportedVerificationRuleIds] = useState<string[] | null>(null);
+  const [verificationSupportError, setVerificationSupportError] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState("");
@@ -150,6 +152,22 @@ function App() {
         setServiceState("offline");
         setHealthError(
           error instanceof Error ? error.message : "Unable to reach the backend",
+        );
+      });
+    getVerificationSupport()
+      .then((ruleIds) => {
+        if (active) {
+          setSupportedVerificationRuleIds(ruleIds);
+          setVerificationSupportError("");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setSupportedVerificationRuleIds(null);
+        setVerificationSupportError(
+          error instanceof Error
+            ? error.message
+            : "Could not check automated verification support.",
         );
       });
     void refreshDashboard();
@@ -463,6 +481,8 @@ function App() {
             {scanResult && (
               <ScanResults
                 result={scanResult}
+                supportedVerificationRuleIds={supportedVerificationRuleIds}
+                verificationSupportError={verificationSupportError}
                 onStageChange={updateRepairWorkflow}
                 onWorkflowUpdate={() => void refreshDashboard()}
               />
@@ -470,6 +490,8 @@ function App() {
 
             <ProjectAnalysisPanel
               hindsight={hindsightSummary}
+              supportedVerificationRuleIds={supportedVerificationRuleIds}
+              verificationSupportError={verificationSupportError}
               onWorkflowUpdate={() => void refreshDashboard()}
             />
           </section>
@@ -819,10 +841,14 @@ function ScanProgress() {
 
 function ScanResults({
   result,
+  supportedVerificationRuleIds,
+  verificationSupportError,
   onStageChange,
   onWorkflowUpdate,
 }: {
   result: ScanResponse;
+  supportedVerificationRuleIds: string[] | null;
+  verificationSupportError: string;
   onStageChange: (stage: RepairWorkflowStage, status: WorkflowStageStatus) => void;
   onWorkflowUpdate: () => void;
 }) {
@@ -910,6 +936,8 @@ function ScanResults({
               index={index}
               pageUrl={result.final_url}
               scanTimestamp={result.scanned_at}
+              supportedVerificationRuleIds={supportedVerificationRuleIds}
+              verificationSupportError={verificationSupportError}
               violation={violation}
               onStageChange={onStageChange}
               onWorkflowUpdate={onWorkflowUpdate}
@@ -926,6 +954,8 @@ function ViolationCard({
   index,
   pageUrl,
   scanTimestamp,
+  supportedVerificationRuleIds,
+  verificationSupportError,
   violation,
   onStageChange,
   onWorkflowUpdate,
@@ -933,6 +963,8 @@ function ViolationCard({
   index: number;
   pageUrl: string;
   scanTimestamp: string;
+  supportedVerificationRuleIds: string[] | null;
+  verificationSupportError: string;
   violation: ScanViolation;
   onStageChange: (stage: RepairWorkflowStage, status: WorkflowStageStatus) => void;
   onWorkflowUpdate: () => void;
@@ -952,6 +984,9 @@ function ViolationCard({
   const [isGeneratingCertificate, setIsGeneratingCertificate] = useState(false);
   const [certificateError, setCertificateError] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
+  const ruleId = violation.rule_id || violation.id;
+  const verificationSupported =
+    supportedVerificationRuleIds?.includes(ruleId) ?? false;
 
   async function handleProposeRepair() {
     const affectedNode = violation.affected_nodes[0];
@@ -998,11 +1033,15 @@ function ViolationCard({
   }
 
   async function handleVerifyRepair() {
-    if (!proposal || proposal.repair_type === "repair_not_safe") return;
+    if (
+      !proposal ||
+      proposal.repair_type === "repair_not_safe" ||
+      !verificationSupported
+    ) return;
     const verificationRequest: VerificationRequest = {
       original_html: proposal.original_html,
       proposed_html: proposal.proposed_html,
-      rule_id: violation.rule_id ?? violation.id,
+      rule_id: ruleId,
       selector:
         violation.css_selectors[0] ??
         violation.affected_html_selectors[0] ??
@@ -1247,14 +1286,27 @@ function ViolationCard({
                   <p><strong>Rationale</strong><br />{proposal.reasoning_summary || proposal.explanation}</p>
                   <p className="proposal-no-apply">This is a suggestion only. It has not been applied to the website.</p>
                   {proposal.repair_type !== "repair_not_safe" && (
-                    <button
-                      className="verify-repair-button"
-                      disabled={isVerifying}
-                      onClick={handleVerifyRepair}
-                      type="button"
-                    >
-                      {isVerifying ? "Verifying repair…" : "Verify Repair"}
-                    </button>
+                    <>
+                      <button
+                        className={`verify-repair-button ${!verificationSupported ? "unsupported" : ""}`}
+                        disabled={isVerifying || !verificationSupported}
+                        onClick={handleVerifyRepair}
+                        type="button"
+                      >
+                        {isVerifying ? "Verifying repair…" : "Verify Repair"}
+                      </button>
+                      {supportedVerificationRuleIds === null ? (
+                        <p className="verification-support-message" role="status">
+                          {verificationSupportError
+                            ? "Automated verification support could not be checked. No verification request has been sent."
+                            : "Checking automated verification support…"}
+                        </p>
+                      ) : !verificationSupported ? (
+                        <p className="verification-support-message" role="status">
+                          Automated verification is not currently supported for this accessibility rule. The issue can still be reviewed, but it cannot be safely verified or applied automatically.
+                        </p>
+                      ) : null}
+                    </>
                   )}
                 </section>
               )}

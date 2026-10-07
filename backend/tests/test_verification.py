@@ -308,23 +308,19 @@ def test_verification_api_returns_structured_result(
     from backend.app.certificates import store
 
     monkeypatch.setattr(store, "DATABASE_PATH", tmp_path / "verifications.sqlite3")
+    monkeypatch.setattr(verification_api, "save_verification_event", lambda *_: None)
 
-    async def fake_verify(
+    async def fake_run_pair(
         request: VerificationRequest,
-    ) -> sandbox.VerificationResult:
+    ) -> tuple[Counter[tuple[str, str]], Counter[tuple[str, str]], bool]:
         assert request.rule_id == "image-alt"
-        return sandbox.VerificationResult(
-            status="verified",
-            rule_id=request.rule_id,
-            original_violation_present=True,
-            repaired_violation_present=False,
-            new_violations=[],
-            scope_safe=True,
-            message="Automated checks passed.",
-            checks=[],
+        return (
+            Counter({("image-alt", "img.hero"): 1}),
+            Counter(),
+            True,
         )
 
-    monkeypatch.setattr(verification_api, "verify_repair", fake_verify)
+    monkeypatch.setattr(sandbox, "_run_pair", fake_run_pair)
     request = verification_request()
 
     response = client.post("/api/repair/verify", json=request.model_dump(mode="json"))
@@ -332,3 +328,20 @@ def test_verification_api_returns_structured_result(
     assert response.status_code == 200
     assert response.json()["status"] == "verified"
     assert response.json()["rule_id"] == "image-alt"
+    assert response.json()["checks"][0]["name"] == "html_syntax"
+
+
+def test_verification_support_api_returns_verifier_rule_ids() -> None:
+    response = client.get("/api/repair/verification-support")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "rule_ids": [
+            "button-name",
+            "image-alt",
+            "input-image-alt",
+            "label",
+            "link-name",
+            "region",
+        ]
+    }

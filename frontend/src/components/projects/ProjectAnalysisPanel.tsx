@@ -52,9 +52,13 @@ const tabs: ProjectTab[] = [
 
 export default function ProjectAnalysisPanel({
   hindsight,
+  supportedVerificationRuleIds,
+  verificationSupportError,
   onWorkflowUpdate,
 }: {
   hindsight: HindsightSummary | null;
+  supportedVerificationRuleIds: string[] | null;
+  verificationSupportError: string;
   onWorkflowUpdate: () => void;
 }) {
   const [project, setProject] = useState<ProjectAnalysisResponse | null>(null);
@@ -143,7 +147,12 @@ export default function ProjectAnalysisPanel({
     const entry = repairs[key];
     const proposal = entry?.proposal;
     const request = entry?.proposalRequest;
-    if (!project?.project_url || !proposal || !request) return;
+    if (
+      !project?.project_url ||
+      !proposal ||
+      !request ||
+      !supportedVerificationRuleIds?.includes(violation.rule_id)
+    ) return;
     const verificationRequest: VerificationRequest = {
       original_html: proposal.original_html,
       proposed_html: proposal.proposed_html,
@@ -374,6 +383,9 @@ export default function ProjectAnalysisPanel({
                     pageFile={pageFile}
                     violation={violation}
                     entry={entry}
+                    verificationSupported={supportedVerificationRuleIds?.includes(violation.rule_id) ?? false}
+                    verificationSupportPending={supportedVerificationRuleIds === null && !verificationSupportError}
+                    verificationSupportError={verificationSupportError}
                     onVerify={() => void handleVerify(key, violation)}
                     onApply={() => void handleApply(key)}
                     onCertificate={() => void handleCertificate(key, violation)}
@@ -476,6 +488,9 @@ function ProjectVerificationCard({
   pageFile,
   violation,
   entry,
+  verificationSupported,
+  verificationSupportPending,
+  verificationSupportError,
   onVerify,
   onApply,
   onCertificate,
@@ -483,6 +498,9 @@ function ProjectVerificationCard({
   pageFile: string;
   violation: ProjectViolation;
   entry: ViolationRepairState;
+  verificationSupported: boolean;
+  verificationSupportPending: boolean;
+  verificationSupportError: string;
   onVerify: () => void;
   onApply: () => void;
   onCertificate: () => void;
@@ -499,10 +517,21 @@ function ProjectVerificationCard({
       </div>
       {entry.error && <p className="project-error" role="alert">{entry.error}</p>}
       {!entry.verification && (
-        <button className="project-action-button" disabled={entry.pending !== undefined} onClick={onVerify} type="button">
-          {entry.pending === "verification" ? <LoaderCircle className="spin" size={13} /> : <ShieldCheck size={13} />}
-          {entry.pending === "verification" ? "Verifying…" : "Verify Repair"}
-        </button>
+        <>
+          <button className={`project-action-button ${!verificationSupported ? "unsupported" : ""}`} disabled={entry.pending !== undefined || !verificationSupported} onClick={onVerify} type="button">
+            {entry.pending === "verification" ? <LoaderCircle className="spin" size={13} /> : <ShieldCheck size={13} />}
+            {entry.pending === "verification" ? "Verifying…" : "Verify Repair"}
+          </button>
+          {!verificationSupported && (
+            <p className="verification-support-message" role="status">
+              {verificationSupportPending
+                ? "Checking automated verification support…"
+                : verificationSupportError
+                  ? "Automated verification support could not be checked. No verification request has been sent."
+                  : "Automated verification is not currently supported for this accessibility rule. The issue can still be reviewed, but it cannot be safely verified or applied automatically."}
+            </p>
+          )}
+        </>
       )}
       {entry.verification && (
         <div className="project-verification-result">

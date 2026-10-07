@@ -65,6 +65,21 @@ describe("dashboard", () => {
             }),
           });
         }
+        if (String(input).endsWith("/api/repair/verification-support")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              rule_ids: [
+                "image-alt",
+                "input-image-alt",
+                "button-name",
+                "link-name",
+                "label",
+                "region",
+              ],
+            }),
+          });
+        }
         if (String(input).endsWith("/api/repair/propose")) {
           return Promise.resolve({
             ok: true,
@@ -631,6 +646,7 @@ describe("dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Propose Repair" }));
     await screen.findByText("AI PROPOSAL — NOT YET VERIFIED");
 
+    expect(screen.getByRole("button", { name: "Verify Repair" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Verify Repair" }));
 
     expect(await screen.findByText("✓ VERIFIED")).toBeInTheDocument();
@@ -638,6 +654,60 @@ describe("dashboard", () => {
     expect(screen.getByText("Original violation: resolved")).toBeInTheDocument();
     expect(screen.getByText("repair resolves violation")).toBeInTheDocument();
     expect(screen.getByText("This is not a formal proof.", { exact: false })).toBeInTheDocument();
+    const verifyCall = vi.mocked(fetch).mock.calls.find(([input]) => (
+      String(input).endsWith("/api/repair/verify")
+    ));
+    expect(verifyCall).toBeDefined();
+    expect(JSON.parse(String(verifyCall?.[1]?.body))).toMatchObject({
+      rule_id: "image-alt",
+      wcag_criterion: "1.1.1 Non-text Content",
+    });
+  });
+
+  it("disables verification and explains unsupported rules without sending a request", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const originalImplementation = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (!String(input).endsWith("/api/scan")) {
+        return originalImplementation(input, init);
+      }
+      const response = await originalImplementation(input, init);
+      const payload = await response.json();
+      payload.violations[0] = {
+        ...payload.violations[0],
+        id: "landmark-one-main",
+        rule_id: "landmark-one-main",
+      };
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await openNewScan(user);
+    await user.type(screen.getByRole("textbox", { name: "Website URL or Website Name" }), "https://example.com");
+    await user.click(screen.getByRole("button", { name: /^scan website$/i }));
+    await screen.findByRole("heading", { name: "1 Issue Found" });
+    await openIssueDetails(user);
+    await user.click(screen.getByRole("button", { name: "Propose Repair" }));
+    await screen.findByText("AI PROPOSAL — NOT YET VERIFIED");
+
+    expect(screen.getByRole("button", { name: "Verify Repair" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Automated verification is not currently supported for this accessibility rule. The issue can still be reviewed, but it cannot be safely verified or applied automatically.",
+    );
+    await user.click(screen.getByRole("button", { name: "Verify Repair" }));
+
+    expect(fetchMock.mock.calls.some(([input]) => (
+      String(input).endsWith("/api/repair/verify")
+    ))).toBe(false);
+    expect(screen.queryByRole("button", { name: "Apply Verified Repair" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Generate Certificate" })).not.toBeInTheDocument();
+    expect(screen.queryByText("⚠ VERIFICATION FAILED")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unsafe / unconfirmed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Inconclusive")).not.toBeInTheDocument();
+    expect(screen.getByText("AI PROPOSAL — NOT YET VERIFIED")).toBeInTheDocument();
   });
 
   it("applies only the verified repair to an isolated copy and displays before/after findings", async () => {

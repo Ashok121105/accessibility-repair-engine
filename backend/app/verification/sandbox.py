@@ -38,6 +38,10 @@ class SandboxScopeError(Exception):
     pass
 
 
+def supported_verification_rule_ids() -> list[str]:
+    return sorted(set(SUPPORTED_RULE_ATTRIBUTES) | SUPPORTED_STRUCTURAL_RULES)
+
+
 class _FragmentParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)

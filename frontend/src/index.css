@@ -316,6 +316,8 @@ h1 span { color: #0d9d82; }
 .verify-repair-button { display: block; margin-top: 10px; padding: 7px 10px; border: 1px solid #b9d6c8; border-radius: 4px; color: #236d59; background: #edf7f1; font: inherit; font-size: 8px; font-weight: 700; cursor: pointer; }
 .verify-repair-button:hover:not(:disabled) { background: #e2f2e9; }
 .verify-repair-button:disabled { cursor: wait; opacity: .65; }
+.verify-repair-button.unsupported:disabled, .project-action-button.unsupported:disabled { cursor: not-allowed; }
+.verification-support-message { margin: 8px 0 0; padding: 9px 10px; border: 1px solid #ead8b5; border-radius: 5px; color: #77551d; background: #fffaf0; font-size: 11px; line-height: 1.5; }
 .verification-result { margin-top: 9px; padding: 10px; border: 1px solid #e7e8df; border-radius: 5px; background: #fbfcf8; }
 .verification-result h4 { margin: 0; color: #80632f; font-size: 9px; letter-spacing: .35px; }
 .verification-result.verified { border-color: #cfe5d7; background: #f5faf6; }

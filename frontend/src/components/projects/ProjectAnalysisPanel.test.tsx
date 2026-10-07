@@ -78,6 +78,15 @@ function uploadResponse(onWorkflowUpdate = vi.fn()) {
   return render(
     <ProjectAnalysisPanel
       hindsight={projectHindsight}
+      supportedVerificationRuleIds={[
+        "image-alt",
+        "input-image-alt",
+        "button-name",
+        "link-name",
+        "label",
+        "region",
+      ]}
+      verificationSupportError=""
       onWorkflowUpdate={onWorkflowUpdate}
     />,
   );
@@ -225,6 +234,64 @@ describe("developer project analysis", () => {
       rule_id: "image-alt",
       verification_id: "a3c64561-9180-4a81-9e37-4fa2e6093995",
     });
+  });
+
+  it("blocks verification, apply, and certificates for unsupported project rules", async () => {
+    const user = userEvent.setup();
+    const unsupportedProject: ProjectAnalysisResponse = {
+      ...projectResult,
+      pages: projectResult.pages.map((page) => ({
+        ...page,
+        violations: page.violations.map((violation) => ({
+          ...violation,
+          rule_id: "landmark-one-main",
+        })),
+      })),
+    };
+    const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      if (String(input).endsWith("/api/project/analyze")) {
+        return Promise.resolve({ ok: true, json: async () => unsupportedProject });
+      }
+      if (String(input).endsWith("/api/repair/propose")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            repair_type: "landmark_addition",
+            explanation: "Add a main landmark.",
+            original_html: '<img class="hero">',
+            proposed_html: '<main><img class="hero"></main>',
+            confidence: 0.8,
+            reasoning_summary: "Wrap existing content.",
+          }),
+        });
+      }
+      return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    uploadResponse();
+
+    await user.upload(
+      screen.getByLabelText("Upload developer project ZIP"),
+      new File(["archive"], "static-site.zip", { type: "application/zip" }),
+    );
+    await screen.findByText("completed");
+    await user.click(screen.getByRole("button", { name: "Violations" }));
+    await user.click(screen.getByRole("button", { name: "Propose Repair" }));
+    await user.click(screen.getByRole("button", { name: "Repair Proposals" }));
+    await screen.findByText("AI proposal · not verified");
+    await user.click(screen.getByRole("button", { name: "Verification" }));
+
+    expect(screen.getByRole("button", { name: "Verify Repair" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Automated verification is not currently supported for this accessibility rule. The issue can still be reviewed, but it cannot be safely verified or applied automatically.",
+    );
+    await user.click(screen.getByRole("button", { name: "Verify Repair" }));
+
+    expect(fetchMock.mock.calls.some(([input]) => (
+      String(input).endsWith("/api/repair/verify")
+    ))).toBe(false);
+    expect(screen.queryByRole("button", { name: "Apply Verified Repair" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Generate Certificate" })).not.toBeInTheDocument();
   });
 
   it("distinguishes unavailable React analysis from a zero-violation completed scan", async () => {

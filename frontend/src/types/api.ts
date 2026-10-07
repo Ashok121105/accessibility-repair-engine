@@ -119,6 +119,10 @@ export interface VerificationRequest {
   repair_proposal: RepairProposal;
 }
 
+export interface VerificationSupportResponse {
+  rule_ids: string[];
+}
+
 export interface VerificationCheck {
   name: string;
   passed: boolean;

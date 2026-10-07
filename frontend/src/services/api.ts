@@ -18,6 +18,7 @@ import type {
   ScanResponse,
   VerificationRequest,
   VerificationResult,
+  VerificationSupportResponse,
   WebsiteHistoryDetail,
   WebsiteHistorySummary,
 } from "../types/api";
@@ -316,6 +317,18 @@ export async function verifyRepair(
     throw new Error(detail);
   }
   return (await response.json()) as VerificationResult;
+}
+
+export async function getVerificationSupport(): Promise<string[]> {
+  const response = await fetch(`${API_BASE_URL}/api/repair/verification-support`);
+  if (!response.ok) {
+    throw new Error(`Verification support check failed (${response.status})`);
+  }
+  const body = (await response.json()) as VerificationSupportResponse;
+  if (!Array.isArray(body.rule_ids) || !body.rule_ids.every((ruleId) => typeof ruleId === "string")) {
+    throw new Error("The backend returned an invalid verification support list.");
+  }
+  return body.rule_ids;
 }
 
 export async function applyVerifiedRepair(
