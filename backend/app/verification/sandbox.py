@@ -256,7 +256,7 @@ async def _install_sandbox_document(
 async def _run_pair(
     request: VerificationRequest,
 ) -> tuple[Counter[tuple[str, str]], Counter[tuple[str, str]], bool]:
-    if request.rule_id == "landmark-one-main":
+    if request.rule_id in {"landmark-one-main", "region"}:
         return await _run_landmark_pair(request)
 
     async with async_playwright() as playwright:
@@ -521,6 +521,25 @@ async def verify_repair(request: VerificationRequest) -> VerificationResult:
             new_violations=[],
             scope_safe=False,
             message="No repair proposal was provided to verify.",
+            checks=checks,
+        )
+
+    if request.rule_id == "region" and not request.context_html:
+        checks.append(
+            VerificationCheck(
+                name="selector_and_context",
+                passed=False,
+                message="A region repair requires sanitized page context from the scanner.",
+            )
+        )
+        return _result(
+            request,
+            status="rejected",
+            original_present=None,
+            repaired_present=None,
+            new_violations=[],
+            scope_safe=False,
+            message="The page context required to verify this structural repair is missing.",
             checks=checks,
         )
 

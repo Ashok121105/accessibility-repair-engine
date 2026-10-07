@@ -14,6 +14,7 @@ from backend.app.accessibility.scanner import (
     LANDMARK_CANDIDATE_SCRIPT,
     WebsiteUnreachable,
     _landmark_target,
+    _region_repair_target,
     enrich_landmark_repair_evidence,
     _run_axe,
     parse_axe_results,
@@ -261,8 +262,13 @@ async def test_landmark_scan_enriches_html_node_with_unique_page_target() -> Non
     )
 
     class EvidencePage:
-        async def evaluate(self, script: str) -> dict[str, object]:
+        async def evaluate(
+            self,
+            script: str,
+            *args: object,
+        ) -> dict[str, object]:
             assert "document.body" in script
+            assert args == ({"targetSelectorGroups": []},)
             return {
                 "contextHtml": context_html,
                 "mainCount": 0,
@@ -315,8 +321,13 @@ async def test_landmark_scan_does_not_select_ambiguous_page_targets() -> None:
     )
 
     class AmbiguousEvidencePage:
-        async def evaluate(self, script: str) -> dict[str, object]:
+        async def evaluate(
+            self,
+            script: str,
+            *args: object,
+        ) -> dict[str, object]:
             assert "document.body" in script
+            assert args == ({"targetSelectorGroups": []},)
             return {
                 "contextHtml": (
                     '<div id="main-content"><h1>Welcome</h1>'
@@ -360,6 +371,83 @@ async def test_landmark_scan_does_not_select_ambiguous_page_targets() -> None:
 
 
 @pytest.mark.anyio
+async def test_region_scan_selects_one_existing_container_covering_all_affected_nodes() -> None:
+    scan = parse_axe_results(
+        url="https://example.com",
+        final_url="https://example.com/",
+        page_title="Example",
+        result={
+            "violations": [
+                {
+                    "id": "region",
+                    "impact": "moderate",
+                    "tags": ["wcag131"],
+                    "description": "Some page content is not contained by landmarks.",
+                    "help": "Fix any of the following.",
+                    "nodes": [
+                        {
+                            "target": ['p[lang="en"]'],
+                            "html": '<p lang="en">Existing content in English.</p>',
+                        },
+                        {
+                            "target": ['p[lang="ar"]'],
+                            "html": '<p lang="ar">Existing content in Arabic.</p>',
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+    target_html = (
+        '<div id="main-content"><h1>Existing page heading</h1>'
+        '<p lang="en">Existing content in English.</p>'
+        '<p lang="ar">Existing content in Arabic.</p></div>'
+    )
+    context_html = f"<header><h2>Site</h2></header>{target_html}<footer>Contact</footer>"
+
+    class EvidencePage:
+        async def evaluate(
+            self,
+            script: str,
+            argument: dict[str, object] | None = None,
+        ) -> dict[str, object]:
+            assert "targetSelectorGroups" in script
+            assert argument == {
+                "targetSelectorGroups": [
+                    ['p[lang="en"]'],
+                    ['p[lang="ar"]'],
+                ]
+            }
+            return {
+                "contextHtml": context_html,
+                "mainCount": 0,
+                "candidates": [
+                    {
+                        "tag": "div",
+                        "selector": "#main-content",
+                        "html": target_html,
+                        "identityMatches": 1,
+                        "unchanged": True,
+                        "hasHeading": True,
+                        "textLength": 90,
+                        "coversTargets": True,
+                    }
+                ],
+            }
+
+    enriched = await enrich_landmark_repair_evidence(
+        EvidencePage(),  # type: ignore[arg-type]
+        scan,
+    )
+    first_node = enriched.violations[0].affected_nodes[0]
+
+    assert first_node.repair_target_html == target_html
+    assert first_node.repair_target_selector == "#main-content"
+    assert first_node.repair_context_html == context_html
+    assert enriched.violations[0].affected_nodes[1].repair_target_html is None
+
+
+@pytest.mark.anyio
 async def test_landmark_page_evidence_is_sanitized_without_changing_target_content() -> None:
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -387,6 +475,27 @@ async def test_landmark_page_evidence_is_sanitized_without_changing_target_conte
             assert target[0].startswith('<div id="main-content">')
             assert "<header>" in target[2]
             assert "script" not in target[2]
+
+            await page.set_content(
+                "<header><h2>Example site</h2></header>"
+                '<div id="main-content"><h1>Welcome</h1>'
+                '<p lang="en">Existing English content for the page visitors.</p>'
+                '<p lang="ar">Existing Arabic content for the page visitors.</p></div>'
+                "<footer>Contact information</footer>"
+            )
+            region_evidence = await page.evaluate(
+                LANDMARK_CANDIDATE_SCRIPT,
+                {
+                    "targetSelectorGroups": [
+                        ['p[lang="en"]'],
+                        ['p[lang="ar"]'],
+                    ]
+                },
+            )
+            region_target = _region_repair_target(region_evidence)
+
+            assert region_target is not None
+            assert region_target[0].startswith('<div id="main-content">')
         finally:
             await browser.close()
 

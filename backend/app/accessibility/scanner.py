@@ -25,7 +25,8 @@ NETWORK_ERROR_MARKERS = (
     "ERR_ADDRESS_UNREACHABLE",
 )
 LANDMARK_CONTEXT_MAX_LENGTH = 20_000
-LANDMARK_CANDIDATE_SCRIPT = """() => {
+LANDMARK_CANDIDATE_SCRIPT = """(options = {}) => {
+  const targetSelectorGroups = options?.targetSelectorGroups ?? [];
   const body = document.body;
   if (!body) return { contextHtml: "", candidates: [] };
   const sanitize = (root) => {
@@ -71,6 +72,18 @@ LANDMARK_CANDIDATE_SCRIPT = """() => {
       : idSelector && document.querySelectorAll(idSelector).length === 1
         ? idSelector
         : classSelector;
+    const coversTargets = targetSelectorGroups.length > 0 &&
+      targetSelectorGroups.every((selectors) => {
+        if (!Array.isArray(selectors) || selectors.length === 0) return false;
+        try {
+          return selectors.every((targetSelector) => {
+            const matches = document.querySelectorAll(targetSelector);
+            return matches.length === 1 && element.contains(matches[0]);
+          });
+        } catch {
+          return false;
+        }
+      });
     return {
       tag: element.tagName.toLowerCase(),
       id: element.id,
@@ -81,6 +94,7 @@ LANDMARK_CANDIDATE_SCRIPT = """() => {
       hasHeading,
       textLength,
       identityMatches,
+      coversTargets,
     };
   });
   return {
@@ -215,27 +229,96 @@ def _landmark_target(
     return candidate["html"], selector, context_html
 
 
+def _region_repair_target(
+    page_evidence: object,
+) -> tuple[str, str, str] | None:
+    if not isinstance(page_evidence, dict):
+        return None
+    context_html = page_evidence.get("contextHtml")
+    candidates = page_evidence.get("candidates")
+    if (
+        not isinstance(context_html, str)
+        or not context_html
+        or len(context_html) > LANDMARK_CONTEXT_MAX_LENGTH
+        or not isinstance(candidates, list)
+        or page_evidence.get("mainCount") != 0
+    ):
+        return None
+
+    qualifying = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and candidate.get("tag") in {"div", "section", "article"}
+        and candidate.get("coversTargets") is True
+        and (
+            candidate.get("identityMatches") == 1
+            or (
+                candidate.get("tag") == "article"
+                and candidate.get("identityMatches") == 0
+                and candidate.get("selector") == "article"
+            )
+        )
+        and candidate.get("hasHeading") is True
+        and candidate.get("unchanged") is True
+        and isinstance(candidate.get("textLength"), int)
+        and candidate["textLength"] >= 30
+        and isinstance(candidate.get("selector"), str)
+        and candidate["selector"]
+        and isinstance(candidate.get("html"), str)
+        and candidate["html"]
+        and context_html.count(candidate["html"]) == 1
+    ]
+    if len(qualifying) != 1:
+        return None
+    candidate = qualifying[0]
+    selector = candidate["selector"]
+    if not re.fullmatch(
+        r"(?:#[A-Za-z][A-Za-z0-9_-]*|(?:div|section|article)\.[A-Za-z][A-Za-z0-9_-]*|article)",
+        selector,
+    ):
+        return None
+    return candidate["html"], selector, context_html
+
+
 async def enrich_landmark_repair_evidence(
     page: Page,
     scan: ScanResponse,
 ) -> ScanResponse:
-    if not any(
-        (violation.rule_id or violation.id) == "landmark-one-main"
+    structural_violations = [
+        violation
         for violation in scan.violations
-    ):
+        if (violation.rule_id or violation.id) in {"landmark-one-main", "region"}
+    ]
+    if not structural_violations:
         return scan
 
-    page_evidence = await page.evaluate(LANDMARK_CANDIDATE_SCRIPT)
-    target = _landmark_target(page_evidence)
-    if target is None:
-        return scan
+    region_selector_groups = [
+        [selector for selector in node.selectors if selector]
+        for violation in structural_violations
+        if (violation.rule_id or violation.id) == "region"
+        for node in violation.affected_nodes
+    ]
+    page_evidence = await page.evaluate(
+        LANDMARK_CANDIDATE_SCRIPT,
+        {"targetSelectorGroups": region_selector_groups},
+    )
 
-    target_html, target_selector, context_html = target
     violations: list[Violation] = []
     for violation in scan.violations:
-        if (violation.rule_id or violation.id) != "landmark-one-main":
+        rule_id = violation.rule_id or violation.id
+        if rule_id not in {"landmark-one-main", "region"}:
             violations.append(violation)
             continue
+        target = (
+            _landmark_target(page_evidence)
+            if rule_id == "landmark-one-main"
+            else _region_repair_target(page_evidence)
+        )
+        if target is None:
+            violations.append(violation)
+            continue
+        target_html, target_selector, context_html = target
         nodes = list(violation.affected_nodes)
         if nodes:
             nodes[0] = nodes[0].model_copy(

@@ -371,14 +371,23 @@ async def test_landmark_one_main_rejects_multiple_semantic_articles() -> None:
 
 @pytest.mark.anyio
 async def test_region_repair_can_add_main_around_unchanged_content() -> None:
-    original_html = '<p lang="en">Existing page content.</p>'
+    original_html = (
+        '<div id="main-content"><h1>Example page</h1>'
+        '<p lang="en">Existing page content with enough meaningful text.</p></div>'
+    )
     proposed_html = f"<main>{original_html}</main>"
+    context_html = (
+        "<header><h2>Example site</h2></header>"
+        f"{original_html}"
+        "<footer>Contact information</footer>"
+    )
     request = VerificationRequest(
         original_html=original_html,
         proposed_html=proposed_html,
         rule_id="region",
-        selector='p[lang="en"]',
+        selector="#main-content",
         wcag_criterion="1.3.1 Info and Relationships",
+        context_html=context_html,
         repair_proposal=RepairProposal(
             repair_type="landmark_addition",
             explanation="Place the existing content in the main landmark.",
@@ -399,6 +408,41 @@ async def test_region_repair_can_add_main_around_unchanged_content() -> None:
 
 
 @pytest.mark.anyio
+async def test_region_repair_without_page_context_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unexpected_scan(request: VerificationRequest) -> object:
+        raise AssertionError("Region repairs without page context must not be scanned")
+
+    monkeypatch.setattr(sandbox, "_run_pair", unexpected_scan)
+    original_html = '<p lang="en">Existing page content.</p>'
+    proposed_html = f"<main>{original_html}</main>"
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="region",
+        selector='p[lang="en"]',
+        repair_proposal=RepairProposal(
+            repair_type="landmark_addition",
+            explanation="Wrap existing content.",
+            original_html=original_html,
+            proposed_html=proposed_html,
+            confidence=0.9,
+            reasoning_summary="The content is unchanged.",
+        ),
+    )
+
+    result = await sandbox.verify_repair(request)
+
+    assert result.status == "rejected"
+    assert result.scope_safe is False
+    assert any(
+        check.name == "selector_and_context" and not check.passed
+        for check in result.checks
+    )
+
+
+@pytest.mark.anyio
 async def test_region_repair_rejects_changed_content_before_scanning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -415,6 +459,10 @@ async def test_region_repair_rejects_changed_content_before_scanning(
         proposed_html=proposed_html,
         rule_id="region",
         selector='p[lang="en"]',
+        context_html=(
+            "<header><h1>Example page</h1></header>"
+            "<p lang='en'>Existing page content.</p>"
+        ),
         repair_proposal=RepairProposal(
             repair_type="landmark_addition",
             explanation="Replace content and add a landmark.",
