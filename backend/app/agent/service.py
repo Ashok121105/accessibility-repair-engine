@@ -217,7 +217,9 @@ class AgentSessionManager:
         context: BrowserContext | None = None
         try:
             playwright = await async_playwright().start()
-            browser = await playwright.chromium.launch(headless=False)
+            browser = await playwright.chromium.launch(
+                headless=get_settings().is_production
+            )
             context = await browser.new_context()
             await context.route("**/*", self._guard_navigation)
             page = await context.new_page()

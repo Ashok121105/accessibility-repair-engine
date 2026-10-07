@@ -9,6 +9,7 @@ from backend.app.agent.intents import parse_command
 from backend.app.agent.page_inspector import inspect_page, summarize_page
 from backend.app.agent.service import AgentError, AgentSession, AgentSessionManager
 from backend.app.api import agent as agent_api
+from backend.app.core.config import Settings
 from backend.app.main import app
 
 client = TestClient(app)
@@ -225,6 +226,11 @@ def fake_browser_stack(monkeypatch, body: str = "") -> tuple[AgentSessionManager
     browser = FakeBrowser(context)
     playwright = FakePlaywright(browser)
     monkeypatch.setattr(agent_service, "async_playwright", lambda: playwright)
+    monkeypatch.setattr(
+        agent_service,
+        "get_settings",
+        lambda: Settings(_env_file=None, app_env="development"),
+    )
     return AgentSessionManager(), page, browser, playwright
 
 
@@ -247,6 +253,43 @@ def test_start_agent_creates_a_persistent_browser_session(monkeypatch) -> None:
     asyncio.run(manager.stop(result["session_id"]))
     assert manager.sessions == {}
     assert browser.context.closed
+    assert browser.closed
+    assert playwright.stopped
+
+
+def test_start_agent_uses_headless_browser_in_production(monkeypatch) -> None:
+    manager, page, browser, playwright = fake_browser_stack(monkeypatch)
+    monkeypatch.setattr(
+        agent_service,
+        "get_settings",
+        lambda: Settings(_env_file=None, app_env="production"),
+    )
+
+    result = asyncio.run(manager.start("https://www.flipkart.com/"))
+
+    assert result["success"] is True
+    assert browser.launch_options["headless"] is True
+    assert page.url == "https://www.flipkart.com/"
+    assert result["session_id"] in manager.sessions
+    asyncio.run(manager.stop(result["session_id"]))
+    assert browser.closed
+    assert playwright.stopped
+
+
+def test_start_agent_uses_headless_browser_when_running_on_render(monkeypatch) -> None:
+    monkeypatch.setenv("RENDER", "true")
+    settings = Settings(_env_file=None, app_env="development")
+    assert settings.is_production is True
+
+    manager, page, browser, playwright = fake_browser_stack(monkeypatch)
+    monkeypatch.setattr(agent_service, "get_settings", lambda: settings)
+    result = asyncio.run(manager.start("https://www.flipkart.com/"))
+
+    assert result["success"] is True
+    assert browser.launch_options["headless"] is True
+    assert page.url == "https://www.flipkart.com/"
+    assert result["session_id"] in manager.sessions
+    asyncio.run(manager.stop(result["session_id"]))
     assert browser.closed
     assert playwright.stopped
 
@@ -279,6 +322,11 @@ def test_start_closes_an_explicitly_labeled_sign_in_popup(monkeypatch) -> None:
     browser = FakeBrowser(context)
     playwright = FakePlaywright(browser)
     monkeypatch.setattr(agent_service, "async_playwright", lambda: playwright)
+    monkeypatch.setattr(
+        agent_service,
+        "get_settings",
+        lambda: Settings(_env_file=None, app_env="development"),
+    )
     manager = AgentSessionManager()
 
     result = asyncio.run(manager.start("https://www.flipkart.com/"))

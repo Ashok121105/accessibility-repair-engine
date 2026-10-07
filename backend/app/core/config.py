@@ -1,16 +1,25 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     app_env: str = "development"
+    is_render: bool = Field(default=False, validation_alias="RENDER")
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     frontend_origin: str = "http://localhost:5173"
     gemini_api_key: str | None = None
+
+    @property
+    def is_production(self) -> bool:
+        return self.is_render or self.app_env.strip().casefold() not in {
+            "development",
+            "dev",
+            "local",
+        }
 
     @field_validator("gemini_api_key", mode="before")
     @classmethod
