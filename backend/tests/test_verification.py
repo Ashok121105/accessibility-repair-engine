@@ -19,9 +19,10 @@ def verification_request(
     proposed_html: str = REPAIRED_HTML,
     rule_id: str = "image-alt",
     selector: str = "img.hero",
+    original_html: str = ORIGINAL_HTML,
 ) -> VerificationRequest:
     return VerificationRequest(
-        original_html=ORIGINAL_HTML,
+        original_html=original_html,
         proposed_html=proposed_html,
         rule_id=rule_id,
         selector=selector,
@@ -30,7 +31,7 @@ def verification_request(
         repair_proposal=RepairProposal(
             repair_type="add_alt_attribute",
             explanation="Add alternative text",
-            original_html=ORIGINAL_HTML,
+            original_html=original_html,
             proposed_html=proposed_html,
             confidence=0.8,
             reasoning_summary="Adds only the missing alt attribute.",
@@ -212,6 +213,72 @@ async def test_unsupported_landmark_and_heading_rules_fail_closed(
     assert result.scope_safe is False
     assert result.checks[0].name == "supported_rule"
     assert result.checks[0].passed is False
+
+
+@pytest.mark.anyio
+async def test_region_repair_can_add_main_around_unchanged_content() -> None:
+    original_html = '<p lang="en">Existing page content.</p>'
+    proposed_html = f"<main>{original_html}</main>"
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="region",
+        selector='p[lang="en"]',
+        wcag_criterion="1.3.1 Info and Relationships",
+        repair_proposal=RepairProposal(
+            repair_type="landmark_addition",
+            explanation="Place the existing content in the main landmark.",
+            original_html=original_html,
+            proposed_html=proposed_html,
+            confidence=0.9,
+            reasoning_summary="The existing content is preserved unchanged.",
+        ),
+    )
+
+    result = await sandbox.verify_repair(request)
+
+    assert result.status == "verified", result.model_dump()
+    assert result.original_violation_present is True
+    assert result.repaired_violation_present is False
+    assert result.scope_safe is True
+    assert all(check.passed for check in result.checks)
+
+
+@pytest.mark.anyio
+async def test_region_repair_rejects_changed_content_before_scanning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_html = '<p lang="en">Existing page content.</p>'
+    proposed_html = "<main><p lang=\"en\">Invented replacement content.</p></main>"
+
+    async def unexpected_scan(request: VerificationRequest) -> object:
+        assert request.rule_id == "region"
+        raise AssertionError("Changed content must not reach axe-core")
+
+    monkeypatch.setattr(sandbox, "_run_pair", unexpected_scan)
+    request = VerificationRequest(
+        original_html=original_html,
+        proposed_html=proposed_html,
+        rule_id="region",
+        selector='p[lang="en"]',
+        repair_proposal=RepairProposal(
+            repair_type="landmark_addition",
+            explanation="Replace content and add a landmark.",
+            original_html=original_html,
+            proposed_html=proposed_html,
+            confidence=0.9,
+            reasoning_summary="The content changed.",
+        ),
+    )
+
+    result = await sandbox.verify_repair(request)
+
+    assert result.status == "rejected"
+    assert result.scope_safe is False
+    assert any(
+        check.name == "repair_scope" and not check.passed
+        for check in result.checks
+    )
 
 
 @pytest.mark.anyio

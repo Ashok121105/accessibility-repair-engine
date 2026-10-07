@@ -22,6 +22,7 @@ SUPPORTED_RULE_ATTRIBUTES: dict[str, frozenset[str]] = {
     "link-name": frozenset({"aria-label", "aria-labelledby"}),
     "label": frozenset({"aria-label", "aria-labelledby"}),
 }
+SUPPORTED_STRUCTURAL_RULES = frozenset({"region"})
 VOID_ELEMENTS = frozenset(
     {
         "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -154,6 +155,23 @@ def _compare_node_shape(
     return True, "Only permitted accessibility attributes changed"
 
 
+def _compare_structural_repair(
+    original: dict[str, object],
+    proposed: dict[str, object],
+) -> tuple[bool, str]:
+    proposed_attrs = proposed["attrs"]
+    proposed_children = proposed["children"]
+    if (
+        proposed["tag"] != "main"
+        or proposed_attrs != {}
+        or proposed_children != [original]
+    ):
+        return False, (
+            "The repair must wrap the unchanged affected element in one attribute-free main landmark"
+        )
+    return True, "The unchanged affected element is wrapped in a main landmark"
+
+
 def _axe_violations(result: object) -> Counter[tuple[str, str]]:
     if not isinstance(result, dict) or not isinstance(result.get("violations"), list):
         raise ValueError("axe-core returned an invalid verification result")
@@ -179,7 +197,7 @@ def _axe_violations(result: object) -> Counter[tuple[str, str]]:
 
 
 async def _run_sandbox_axe(page: object) -> object:
-    return await Axe().run(page, context="#repair-sandbox")
+    return await Axe().run(page)
 
 
 async def _install_sandbox_document(
@@ -190,7 +208,7 @@ async def _install_sandbox_document(
 ) -> None:
     await page.set_content(  # type: ignore[attr-defined]
         "<!doctype html><html lang='en'><head><title>Repair verification sandbox</title>"
-        "</head><body><main id='repair-sandbox'></main></body></html>",
+        "</head><body><div id='repair-sandbox'></div></body></html>",
         wait_until="domcontentloaded",
     )
     result = await page.evaluate(  # type: ignore[attr-defined]
@@ -325,7 +343,10 @@ def _result(
 async def verify_repair(request: VerificationRequest) -> VerificationResult:
     checks: list[VerificationCheck] = []
     supported_attributes = SUPPORTED_RULE_ATTRIBUTES.get(request.rule_id)
-    if supported_attributes is None:
+    if (
+        supported_attributes is None
+        and request.rule_id not in SUPPORTED_STRUCTURAL_RULES
+    ):
         checks.append(
             VerificationCheck(
                 name="supported_rule",
@@ -448,11 +469,17 @@ async def verify_repair(request: VerificationRequest) -> VerificationResult:
         )
     )
 
-    scope_safe, scope_message = _compare_node_shape(
-        original.roots[0],
-        proposed.roots[0],
-        supported_attributes,
-    )
+    if supported_attributes is not None:
+        scope_safe, scope_message = _compare_node_shape(
+            original.roots[0],
+            proposed.roots[0],
+            supported_attributes,
+        )
+    else:
+        scope_safe, scope_message = _compare_structural_repair(
+            original.roots[0],
+            proposed.roots[0],
+        )
     checks.append(
         VerificationCheck(
             name="repair_scope",
