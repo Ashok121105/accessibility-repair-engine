@@ -117,6 +117,25 @@ def mock_gemini_responses(
 
 
 @pytest.mark.anyio
+async def test_gemini_model_can_be_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    posted = mock_gemini(
+        monkeypatch,
+        gemini_text_response(json.dumps(valid_proposal())),
+    )
+
+    provider = providers.GeminiRepairProposalProvider("test-secret", model="gemini-2.5-flash")
+    await provider.generate(
+        prompt="test prompt",
+        response_schema={"type": "OBJECT", "properties": {"ok": {"type": "BOOLEAN"}}, "required": ["ok"]},
+    )
+
+    assert posted[0]["url"] == (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-2.5-flash:generateContent"
+    )
+
+
+@pytest.mark.anyio
 async def test_generates_valid_proposal_with_server_only_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     posted = mock_gemini(
         monkeypatch,
@@ -127,7 +146,7 @@ async def test_generates_valid_proposal_with_server_only_api_key(monkeypatch: py
 
     assert posted[0]["url"] == (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-3.6-flash:generateContent"
+        "gemini-2.5-flash:generateContent"
     )
     assert posted[0]["headers"] == {"x-goog-api-key": "test-secret"}
     assert "test-secret" not in str(posted[0]["url"])
@@ -693,11 +712,13 @@ def test_proposal_endpoint_returns_structured_proposal(monkeypatch: pytest.Monke
         api_key: str | None,
         openai_api_key: str | None,
         openai_model: str | None,
+        gemini_model: str | None = None,
     ) -> RepairProposal:
         assert repair_request.violation_rule_id == "image-alt"
         assert api_key is None
         assert openai_api_key is None
         assert openai_model is None
+        assert gemini_model == "gemini-2.5-flash"
         return RepairProposal(**valid_proposal())
 
     monkeypatch.setattr(repair_api, "propose_repair", fake_propose)
@@ -727,11 +748,13 @@ def test_proposal_endpoint_surfaces_missing_api_key(monkeypatch: pytest.MonkeyPa
         api_key: str | None,
         openai_api_key: str | None,
         openai_model: str | None,
+        gemini_model: str | None = None,
     ) -> RepairProposal:
         assert repair_request.violation_rule_id == "image-alt"
         assert api_key is None or isinstance(api_key, str)
         assert openai_api_key is None or isinstance(openai_api_key, str)
         assert openai_model is None or isinstance(openai_model, str)
+        assert gemini_model is None or isinstance(gemini_model, str)
         raise service.MissingGeminiApiKey("GEMINI_API_KEY is not configured")
 
     monkeypatch.setattr(repair_api, "propose_repair", no_key)

@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     api_port: int = 8000
     frontend_origin: str = "http://localhost:5173"
     gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.5-flash"
     openai_api_key: str | None = None
     openai_model: str | None = None
 
@@ -29,6 +30,13 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("gemini_model", mode="before")
+    @classmethod
+    def normalize_empty_gemini_model(cls, value: str | None) -> str:
+        if isinstance(value, str) and not value.strip():
+            return "gemini-2.5-flash"
+        return value or "gemini-2.5-flash"
 
     @field_validator("openai_api_key", "openai_model", mode="before")
     @classmethod

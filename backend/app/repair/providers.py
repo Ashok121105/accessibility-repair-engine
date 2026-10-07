@@ -6,11 +6,15 @@ from typing import Any, Protocol
 import httpx
 
 logger = logging.getLogger(__name__)
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"
 )
+
+
+def gemini_api_url_for_model(model: str) -> str:
+    return GEMINI_API_URL.replace(f"{GEMINI_MODEL}:generateContent", f"{model}:generateContent", 1)
 GEMINI_TIMEOUT_SECONDS = 30
 GEMINI_MAX_RETRIES = 2
 GEMINI_RETRY_BACKOFF_SECONDS = 0.5
@@ -56,12 +60,13 @@ class ProviderFallbackError(Exception):
 
 
 class GeminiRepairProposalProvider:
-    def __init__(self, api_key: str | None) -> None:
+    def __init__(self, api_key: str | None, model: str | None = None) -> None:
         if not api_key or not api_key.strip():
             raise ProviderConfigurationError(
                 "Gemini is unavailable because GEMINI_API_KEY is not configured"
             )
         self._api_key = api_key
+        self._model = (model or GEMINI_MODEL).strip() or GEMINI_MODEL
 
     async def generate(
         self,
@@ -80,11 +85,12 @@ class GeminiRepairProposalProvider:
             },
         }
 
+        api_url = gemini_api_url_for_model(self._model)
         try:
             async with httpx.AsyncClient(timeout=GEMINI_TIMEOUT_SECONDS) as client:
                 for attempt in range(GEMINI_MAX_RETRIES + 1):
                     response = await client.post(
-                        GEMINI_API_URL,
+                        api_url,
                         headers={"x-goog-api-key": self._api_key},
                         json=payload,
                     )

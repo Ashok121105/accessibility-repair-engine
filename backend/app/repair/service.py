@@ -435,9 +435,10 @@ def create_repair_proposal_provider(
     openai_api_key: str | None = None,
     openai_model: str | None = None,
     allow_fallback: bool = True,
+    gemini_model: str | None = None,
 ) -> RepairProposalProvider:
     try:
-        primary = GeminiRepairProposalProvider(gemini_api_key)
+        primary = GeminiRepairProposalProvider(gemini_api_key, model=gemini_model)
     except ProviderConfigurationError as error:
         raise MissingGeminiApiKey(str(error)) from error
 
@@ -455,6 +456,7 @@ async def propose_repair(
     api_key: str | None,
     openai_api_key: str | None = None,
     openai_model: str | None = None,
+    gemini_model: str | None = None,
 ) -> RepairProposal:
     if request.violation_rule_id == "region":
         if not _has_deterministic_landmark_target(request):
@@ -509,6 +511,7 @@ async def propose_repair(
         openai_api_key,
         openai_model,
         allow_fallback=request.violation_rule_id in supported_verification_rule_ids(),
+        gemini_model=gemini_model,
     )
     if not request.affected_html.strip():
         return RepairProposal(
